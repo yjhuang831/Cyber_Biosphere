@@ -17,6 +17,8 @@ public class GrassManager : MonoBehaviour
     public float agingRate = 0.1f; // Rate at which grass ages, affecting energy and density over time
     public float baseGrowthCost = 0.5f; // Energy cost per metabolic cycle for density growth
     public int flowerLimit = 1; // Max flowering events per month to prevent over-flowering and encourage diversity
+    [Tooltip("Clone attempts each plant may make per sim day. 0 = unlimited (one attempt per plant update, the original behaviour).")]
+    [Min(0)] public int maxCloneAttemptsPerDay = 0;
 
     // Collection of active grass instances for individual updates
     internal Dictionary<Vector3Int, GrassInstance> activeGrassInstances = new Dictionary<Vector3Int, GrassInstance>();
@@ -61,31 +63,26 @@ public class GrassManager : MonoBehaviour
                     {
                         grassInstance.floweringDays = IncrementWithWrap(grassInstance.floweringDays);
                     }
-                    if (!grassInstance.IsDormant && plantAging)
-                    {
-                        grassInstance.ageEffect += agingRate;
-                    }
-                    else
-                    {
-                        grassInstance.dormancyTimer = IncrementWithWrap(grassInstance.dormancyTimer);
-                        if (plantAging)
-                            grassInstance.ageEffect += agingRate * grassInstance.dormancyEffect;
-                    }
+                    grassInstance.ApplyDailyAgeing(plantAging, agingRate, TimeController.fullDayLength);
+
+                    // After the day's ageing (which reflects yesterday's state), decide dormancy from yesterday's daylight
+                    grassInstance.DailyDormancyDecision();
                 }
 
                 grassInstance.PerformMetabolism(data, metabolismCostPerAllele, simTime, baseGrowthCost, TimeController.isNight);
 
                 // Check if grass should reproduce (handles energy deduction internally)
-                if (!grassInstance.IsDormant && grassInstance.CheckAndHandleSpread())
+                if (!grassInstance.IsDormant && grassInstance.CheckAndHandleSpread() && TryUseCloneAttempt(grassInstance))
                 {
                     SpreadIndividualGrass(tilePos, data);
                 }
-                if (grassInstance.floweringDays > 0)
+                if (grassInstance.floweringDays > 0 && !grassInstance.IsFlowering)
                 {
-                    if (!grassInstance.IsFlowering)
-                    {
-                        grassInstance.floweringDays = 0;
-                    }
+                    grassInstance.floweringDays = 0;
+                }
+                // Self-pollination is rolled once per day, on the same daily tick as pollen spread
+                if (TimeController.accumulatedAge > 0 && grassInstance.IsFlowering && grassInstance.floweringDays > 0)
+                {
                     SelfPollinate(grassInstance, tilePos);
                 }
                 bool startedFloweringThisTick = false;
@@ -115,6 +112,34 @@ public class GrassManager : MonoBehaviour
         {
             TimeController.accumulatedAge -= 1; // Decrement accumulated age after applying aging effects to grass instances
         }
+    }
+
+    /// <summary>
+    /// Enforces maxCloneAttemptsPerDay. An attempt counts even if the chosen neighbour turns out to be occupied.
+    /// </summary>
+    private bool TryUseCloneAttempt(GrassInstance grass)
+    {
+        long today = TimeController.simDaysSinceStart;
+        if (grass.lastCloneDay != today)
+        {
+            grass.lastCloneDay = today;
+            grass.cloneAttemptsToday = 0;
+        }
+
+        if (maxCloneAttemptsPerDay > 0 && grass.cloneAttemptsToday >= maxCloneAttemptsPerDay)
+        {
+            if (grass.cloneAttemptsToday == maxCloneAttemptsPerDay)
+            {
+                // Count each capped plant once per day; the bump past the limit marks it as already counted
+                ResearchCounters.Today.cloneAttemptsCapped++;
+                grass.cloneAttemptsToday++;
+            }
+            return false;
+        }
+
+        grass.cloneAttemptsToday++;
+        ResearchCounters.Today.cloneAttempts++;
+        return true;
     }
 
     internal void SpreadIndividualGrass(Vector3Int origin, EnvironmentData originData)
@@ -150,13 +175,15 @@ public class GrassManager : MonoBehaviour
             // Register the grass instance for updates
             activeGrassInstances[gridposition] = targetData.grass;
             plantCount = IncrementWithWrap(plantCount);
+            ResearchCounters.RecordBirth(BirthCause.Clone);
 
             mapManager.UpdateGrassTile(targetData, gridposition);
         }
     }
 
-    internal void SpawnNewGrass(EnvironmentData targetData, Vector3Int gridposition, PlantGenome genome = null, float iniEnergy = 0f, string parentGenus = null)
+    internal void SpawnNewGrass(EnvironmentData targetData, Vector3Int gridposition, PlantGenome genome = null, float iniEnergy = 0f, string parentGenus = null, BirthCause cause = BirthCause.Player)
     {
+        ResearchCounters.RecordBirth(cause);
         bool hadGrass = targetData.grass != null;
         PlantGenome newGenome = null;
         bool isSavedSpecies = false;
@@ -219,6 +246,7 @@ public class GrassManager : MonoBehaviour
         targetData.grass.energyStored = initialEnergy;
         activeGrassInstances[tilePosition] = targetData.grass;
         plantCount = IncrementWithWrap(plantCount);
+        ResearchCounters.RecordBirth(BirthCause.Player);
         mapManager.UpdateGrassTile(targetData, tilePosition);
         return true;
     }
@@ -255,6 +283,7 @@ public class GrassManager : MonoBehaviour
             genus = resolvedGenus,
             species = resolvedSpecies,
             origin = resolvedOrigin,
+            speciesGuid = string.IsNullOrWhiteSpace(source.speciesGuid) ? null : source.speciesGuid,
             generation = 0,  // All spawned genomes start at generation 0
             genusColor = source.genusColor != null
                 ? new Color(source.genusColor.r, source.genusColor.g, source.genusColor.b, source.genusColor.a)
@@ -272,10 +301,72 @@ public class GrassManager : MonoBehaviour
         }
         else
         {
-            genome.phenotypes = new float[TraitId.SeedingProportion + 1];
+            genome.phenotypes = new float[TraitId.Count];
         }
 
         return genome;
+    }
+
+    /// <summary>
+    /// Pushes a library species rename onto genomes living in this simulation (plants, pending seed genomes, seeds).
+    /// Founders spawned from the library carry the names; their pure lineage carries the old epithet as origin tag.
+    /// Hybrid origin tags ("A × B") are historical records and are left untouched.
+    /// </summary>
+    internal void ApplySpeciesRename(string speciesGuid, string oldSpecies, string newGenus, string newSpecies)
+    {
+        if (string.IsNullOrEmpty(speciesGuid))
+            return;
+
+        foreach (GrassInstance grass in activeGrassInstances.Values)
+        {
+            RenameGenome(grass.genome, speciesGuid, oldSpecies, newGenus, newSpecies);
+            RenameGenome(grass.seedGenome, speciesGuid, oldSpecies, newGenus, newSpecies);
+        }
+
+        if (seedManager != null)
+        {
+            foreach (List<Seed> seeds in seedManager.activeSeeds.Values)
+            {
+                for (int i = 0; i < seeds.Count; i++)
+                {
+                    RenameGenome(seeds[i].carriedGenome, speciesGuid, oldSpecies, newGenus, newSpecies);
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Makes a living plant the founding specimen of a newly saved library species, using the same convention as
+    /// plants spawned from the library (names set, origin tag = epithet). The plant gets its own genome copy so
+    /// genetically identical siblings sharing the genome object are not swept into the species.
+    /// </summary>
+    internal void AssignSpecimenToSpecies(GrassInstance grass, string speciesGuid, string genus, string species)
+    {
+        if (grass == null || grass.genome == null || string.IsNullOrEmpty(speciesGuid))
+            return;
+
+        PlantGenome specimen = grass.genome.DeepCopy();
+        specimen.speciesGuid = speciesGuid;
+        specimen.genus = genus;
+        specimen.species = species;
+        specimen.origin = species;
+        grass.genome = specimen;
+    }
+
+    private static void RenameGenome(PlantGenome genome, string speciesGuid, string oldSpecies, string newGenus, string newSpecies)
+    {
+        if (genome == null || genome.speciesGuid != speciesGuid)
+            return;
+
+        if (!string.IsNullOrWhiteSpace(genome.genus) || !string.IsNullOrWhiteSpace(genome.species))
+        {
+            genome.genus = newGenus;
+            genome.species = newSpecies;
+        }
+        if (genome.origin == oldSpecies)
+        {
+            genome.origin = newSpecies;
+        }
     }
 
     private static List<Allele> DeserializeAlleles(List<AlleleState> source)
@@ -296,10 +387,16 @@ public class GrassManager : MonoBehaviour
 
     public void RemoveGrassInstance(Vector3Int tilePos, EnvironmentData data)
     {
+        RemoveGrassInstance(tilePos, data, DeathCause.Other);
+    }
+
+    internal void RemoveGrassInstance(Vector3Int tilePos, EnvironmentData data, DeathCause cause)
+    {
         activeGrassInstances.Remove(tilePos);
 
         if (data.grass != null)
         {
+            ResearchCounters.RecordDeath(cause);
             data.grass.Die(); // Handle any cleanup in the GrassInstance itself
             if (plantCount > 0)
             {
@@ -316,8 +413,8 @@ public class GrassManager : MonoBehaviour
         {
             if (!data.grass.IsAlive())
             {
-                // Grass died from energy depletion
-                RemoveGrassInstance(tilePos, data);
+                // Grass died (starvation, dormancy timeout, or withering)
+                RemoveGrassInstance(tilePos, data, data.grass.GetDeathCause());
             }
             else
             {
@@ -348,6 +445,7 @@ public class GrassManager : MonoBehaviour
 
         grass.reproductiveState = ReproductiveState.Flowering;
         grass.flowersThisMonth = IncrementWithWrap(grass.flowersThisMonth);
+        ResearchCounters.Today.floweringStarts++;
         return true;
     }
 
@@ -359,15 +457,17 @@ public class GrassManager : MonoBehaviour
         }
 
         int range = (int)grass.genome.GetTraitValue(TraitId.PollenRange); // Pollen range
-        List<Vector3Int> possibleTiles = mapManager.GetTilePosOfRange(grassPos, range);
 
         // Precompute pollen gamete once; all pollen from this grass is identical for this event
         var pollenGamete = geneManager.Meiosis(grass.genome, mapManager.GetTileEnvironmentData(grassPos).radiation);
 
         // Reservoir-sample up to 7 receiver tiles to avoid full shuffle
         const int maxTargets = 7;
+        using (var pooledRange = GetPooledPositions())
         using (var pooled = GetPooledPositions())
         {
+            List<Vector3Int> possibleTiles = pooledRange.List;
+            mapManager.GetTilePosOfRange(grassPos, range, possibleTiles);
             List<Vector3Int> chosen = pooled.List;
             int seen = 0;
             foreach (var tile in possibleTiles)
@@ -419,61 +519,56 @@ public class GrassManager : MonoBehaviour
                             targetGrass.genome.generation,
                             grass.genome.generation,
                             targetGrass.genome.origin,
-                            grass.genome.origin);
+                            grass.genome.origin,
+                            targetGrass.genome.speciesGuid,
+                            grass.genome.speciesGuid);
 
                         targetGrass.reproductiveState = ReproductiveState.Seeding;
                         targetGrass.seedGenome = seedGenome;
+                        ResearchCounters.Today.crossPollinations++;
                     }
                 }
             }
         }
     }
 
-    private static float CalculateTraitCompositionDivergence(List<Allele> left, List<Allele> right)
+    // [OPTIMIZED] Reused per-trait locus count buffer (left minus right) for divergence checks
+    private int[] traitCountDelta = new int[32];
+
+    private float CalculateTraitCompositionDivergence(List<Allele> left, List<Allele> right)
     {
         if (left == null || right == null)
         {
             return 0f;
         }
 
-        Dictionary<int, int> leftCounts = new Dictionary<int, int>();
-        Dictionary<int, int> rightCounts = new Dictionary<int, int>();
+        int maxTraitId = -1;
+        for (int i = 0; i < left.Count; i++)
+            maxTraitId = Mathf.Max(maxTraitId, left[i].traitId);
+        for (int i = 0; i < right.Count; i++)
+            maxTraitId = Mathf.Max(maxTraitId, right[i].traitId);
+        if (maxTraitId >= traitCountDelta.Length)
+        {
+            traitCountDelta = new int[maxTraitId + 1];
+        }
 
         for (int i = 0; i < left.Count; i++)
         {
-            int traitId = left[i].traitId;
-            if (!leftCounts.ContainsKey(traitId))
-            {
-                leftCounts[traitId] = 0;
-            }
-            leftCounts[traitId] += 1;
+            if (left[i].traitId >= 0)
+                traitCountDelta[left[i].traitId]++;
         }
-
         for (int i = 0; i < right.Count; i++)
         {
-            int traitId = right[i].traitId;
-            if (!rightCounts.ContainsKey(traitId))
-            {
-                rightCounts[traitId] = 0;
-            }
-            rightCounts[traitId] += 1;
+            if (right[i].traitId >= 0)
+                traitCountDelta[right[i].traitId]--;
         }
 
         int totalAlleles = left.Count + right.Count;
         float divergence = 0f;
-
-        foreach (KeyValuePair<int, int> kvp in leftCounts)
+        for (int t = 0; t <= maxTraitId; t++)
         {
-            int rightCount = rightCounts.TryGetValue(kvp.Key, out int value) ? value : 0;
-            divergence += Mathf.Abs(kvp.Value - rightCount);
-        }
-
-        foreach (KeyValuePair<int, int> kvp in rightCounts)
-        {
-            if (!leftCounts.ContainsKey(kvp.Key))
-            {
-                divergence += kvp.Value;
-            }
+            divergence += Mathf.Abs(traitCountDelta[t]);
+            traitCountDelta[t] = 0; // leave the buffer clean for the next call
         }
 
         return totalAlleles > 0 ? divergence / totalAlleles : 0f;
@@ -486,6 +581,7 @@ public class GrassManager : MonoBehaviour
             if (Random.value > 0.5f)
             {
                 parent.reproductiveState = ReproductiveState.None;
+                ResearchCounters.Today.selfPollinationFailures++;
                 return; // 50% chance to fail self-pollination
             }
             var firstGamete = geneManager.Meiosis(parent.genome, mapManager.GetTileEnvironmentData(parentPos).radiation);
@@ -497,15 +593,20 @@ public class GrassManager : MonoBehaviour
                 parent.genome.generation,
                 parent.genome.generation,
                 parent.genome.origin,
-                parent.genome.origin);
+                parent.genome.origin,
+                parent.genome.speciesGuid,
+                parent.genome.speciesGuid);
 
             parent.reproductiveState = ReproductiveState.Seeding;
             parent.seedGenome = seedGenome;
+            ResearchCounters.Today.selfPollinations++;
         }
     }
 
     /// <summary>
-    /// Disperse seeds from a seeding grass. Picks up to 7 target tiles in range, places seeds on empty tiles.
+    /// Disperse seeds from a seeding grass. Releases SeedCount seeds that split the stored seeding energy evenly;
+    /// each lands on a random tile within the Manhattan dispersal range (several may share a tile).
+    /// Seeds landing off-map or on a full tile are lost along with their energy.
     /// </summary>
     private void DisperseSeed(GrassInstance parent, Vector3Int parentPos)
     {
@@ -514,50 +615,56 @@ public class GrassManager : MonoBehaviour
         parent.reproductiveState = ReproductiveState.None;
 
         int range = Mathf.Max(1, (int)parent.genome.GetTraitValue(TraitId.SeedDispersalRange)); // reuse trait 21 for seed dispersal radius
-        List<Vector3Int> possibleTiles = mapManager.GetTilePosOfRange(parentPos, range);
+        int seedCount = Mathf.Max(1, Mathf.RoundToInt(parent.genome.GetTraitValue(TraitId.SeedCount)));
+        float energyPerSeed = parent.seedingEnergy / seedCount;
+        // Seed provisioning traits come from the mother, like germination energy and sprout stage
+        float germinationEnergy = parent.genome.GetTraitValue(TraitId.GerminationEnergy);
+        byte sproutStage = (byte)parent.genome.GetTraitValue(TraitId.SproutStage);
+        float germinationCue = parent.genome.GetTraitValue(TraitId.GerminationCue);
+        float coldPreservation = parent.genome.GetTraitValue(TraitId.SeedColdPreservation);
 
-        // Reservoir-sample up to 7 targets
-        const int maxTargets = 7;
-        using (var pooled = GetPooledPositions())
+        ResearchCounters.Today.seedDispersals++;
+        ResearchCounters.Today.seedsReleased += seedCount;
+        for (int i = 0; i < seedCount; i++)
         {
-            List<Vector3Int> chosen = pooled.List;
-            int seen = 0;
-            foreach (var tile in possibleTiles)
+            Vector3Int tile = parentPos + RandomOffsetInManhattanRange(range);
+            if (!mapManager.IsValidTilePosition(tile))
             {
-                if (seen < maxTargets)
-                {
-                    chosen.Add(tile);
-                }
-                else
-                {
-                    int j = Random.Range(0, seen + 1);
-                    if (j < maxTargets)
-                    {
-                        chosen[j] = tile;
-                    }
-                }
-                seen++;
+                ResearchCounters.Today.seedsLost++;
+                continue;
             }
 
-            foreach (var tile in chosen)
+            bool added = seedManager.TryAddSeed(tile, new Seed
             {
-                if (!mapManager.IsValidTilePosition(tile))
-                    continue;
-
-                PlantGenome seedGenome = parent.seedGenome;
-
-                seedManager.TryAddSeed(tile, new Seed
-                {
-                    carriedGenome = seedGenome,
-                    parentGenus = parent.genome.genus,
-                    storedEnergy = parent.seedingEnergy / (int)parent.genome.GetTraitValue(TraitId.SeedCount), // Total seeding energy divided by seed count
-                    germinationEnergy = parent.genome.GetTraitValue(TraitId.GerminationEnergy),
-                    germinationStage = 0,
-                    sproutStage = (byte)parent.genome.GetTraitValue(TraitId.SproutStage)
-                });
+                carriedGenome = parent.seedGenome,
+                parentGenus = parent.genome.genus,
+                storedEnergy = energyPerSeed,
+                germinationEnergy = germinationEnergy,
+                germinationStage = 0,
+                sproutStage = sproutStage,
+                germinationCue = germinationCue,
+                coldPreservation = coldPreservation
+            });
+            if (!added)
+            {
+                ResearchCounters.Today.seedsLost++; // Tile already at the seed cap
             }
-            parent.seedingEnergy = 0f;
-            parent.seedGenome = null;
+        }
+        parent.seedingEnergy = 0f;
+        parent.seedGenome = null;
+    }
+
+    /// <summary>
+    /// Uniform random offset with |dx| + |dy| <= range (rejection sampling; acceptance is ~50%).
+    /// </summary>
+    private static Vector3Int RandomOffsetInManhattanRange(int range)
+    {
+        while (true)
+        {
+            int dx = Random.Range(-range, range + 1);
+            int dy = Random.Range(-range, range + 1);
+            if (Mathf.Abs(dx) + Mathf.Abs(dy) <= range)
+                return new Vector3Int(dx, dy, 0);
         }
     }
 

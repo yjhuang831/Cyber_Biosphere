@@ -124,42 +124,146 @@ public static class SimulationLoadSystem
             return false;
         }
 
+        // Phase 1: parse, validate, migrate, and rebuild genomes without touching the scene.
+        // Anything that fails here leaves the running simulation untouched.
+        SimulationSnapshot snapshot;
+        PlantGenome[] genomes;
         try
         {
             string json = File.ReadAllText(snapshotPath);
-            SimulationSnapshot snapshot = JsonUtility.FromJson<SimulationSnapshot>(json);
+            snapshot = JsonUtility.FromJson<SimulationSnapshot>(json);
             if (snapshot == null)
             {
                 Debug.LogError("Load failed: snapshot JSON is empty or invalid.");
                 return false;
             }
 
-            if (snapshot.schemaVersion != SimulationSnapshotConstants.SchemaVersion)
+            if (snapshot.schemaVersion < SimulationSnapshotConstants.MinimumSupportedSchemaVersion
+                || snapshot.schemaVersion > SimulationSnapshotConstants.SchemaVersion)
             {
-                Debug.LogError("Load failed: schema mismatch. Snapshot " + snapshot.schemaVersion + ", expected " + SimulationSnapshotConstants.SchemaVersion + ".");
+                Debug.LogError("Load failed: unsupported schema " + snapshot.schemaVersion + ". Supported schemas: "
+                    + SimulationSnapshotConstants.MinimumSupportedSchemaVersion + " to " + SimulationSnapshotConstants.SchemaVersion + ".");
                 return false;
             }
 
-            if (snapshot.map == null || snapshot.tiles == null)
+            if (snapshot.map == null || snapshot.tiles == null || snapshot.map.width <= 0 || snapshot.map.height <= 0)
             {
                 Debug.LogError("Load failed: snapshot is missing map or tile data.");
                 return false;
             }
 
-            ApplySnapshot(snapshot, timeController, mapManager, environmentManager, grassManager, seedManager);
+            if (snapshot.schemaVersion < 8)
+            {
+                MigrateInlineGenomes(json, snapshot);
+            }
+
+            GeneManager geneManager = UnityEngine.Object.FindFirstObjectByType<GeneManager>();
+            if (geneManager == null)
+            {
+                Debug.LogWarning("GeneManager not found during load. Loaded genomes will use fallback phenotype defaults.");
+            }
+            genomes = DeserializeGenomeTable(snapshot.genomes, geneManager);
+        }
+        catch (Exception ex)
+        {
+            Debug.LogError("Load failed while reading " + snapshotPath + ": " + ex.Message);
+            return false;
+        }
+
+        // Phase 2: apply to the scene.
+        try
+        {
+            ApplySnapshot(snapshot, genomes, timeController, mapManager, environmentManager, grassManager, seedManager);
             SetSimulationNameFromSaveName(snapshotPath);
             Debug.Log("Load complete: " + snapshotPath);
             return true;
         }
         catch (Exception ex)
         {
-            Debug.LogError("Load failed: " + ex.Message);
+            Debug.LogError("Load failed while applying " + snapshotPath + " (simulation may be partially loaded): " + ex);
             return false;
         }
     }
 
+    /// <summary>
+    /// Schema 6/7 stored grass and seeds inside each tile with a full genome copy per object.
+    /// Re-reads the file through legacy views and converts it to the schema 8 lists + genome table.
+    /// </summary>
+    private static void MigrateInlineGenomes(string json, SimulationSnapshot snapshot)
+    {
+        snapshot.genomes = new List<PlantGenomeState>();
+        snapshot.plants = new List<GrassState>();
+        snapshot.seeds = new List<SeedState>();
+
+        LegacySnapshotPayload legacy = JsonUtility.FromJson<LegacySnapshotPayload>(json);
+        if (legacy == null || legacy.tiles == null)
+            return;
+
+        for (int i = 0; i < legacy.tiles.Count; i++)
+        {
+            LegacyTileState tile = legacy.tiles[i];
+            if (tile == null)
+                continue;
+
+            LegacyGrassState grass = tile.grass;
+            if (grass != null && !TryGetGenomeStateInvalidReason(grass.genome, out _))
+            {
+                grass.tileX = tile.x;
+                grass.tileY = tile.y;
+                grass.genomeIndex = AddLegacyGenome(snapshot.genomes, grass.genome);
+                grass.seedGenomeIndex = AddLegacyGenome(snapshot.genomes, grass.seedGenome);
+                grass.nightEffect = 1f;
+                snapshot.plants.Add(grass);
+            }
+
+            if (tile.seeds == null)
+                continue;
+
+            for (int s = 0; s < tile.seeds.Count; s++)
+            {
+                LegacySeedState seed = tile.seeds[s];
+                if (seed == null || TryGetGenomeStateInvalidReason(seed.carriedGenome, out _))
+                    continue;
+
+                seed.tileX = tile.x;
+                seed.tileY = tile.y;
+                seed.genomeIndex = AddLegacyGenome(snapshot.genomes, seed.carriedGenome);
+                seed.germinationCue = 0f;
+                seed.coldPreservation = 0f;
+                snapshot.seeds.Add(seed);
+            }
+        }
+    }
+
+    private static int AddLegacyGenome(List<PlantGenomeState> table, PlantGenomeState genome)
+    {
+        if (TryGetGenomeStateInvalidReason(genome, out _))
+            return -1;
+        table.Add(genome);
+        return table.Count - 1;
+    }
+
+    private static PlantGenome[] DeserializeGenomeTable(List<PlantGenomeState> table, GeneManager geneManager)
+    {
+        if (table == null)
+            return new PlantGenome[0];
+
+        PlantGenome[] result = new PlantGenome[table.Count];
+        for (int i = 0; i < table.Count; i++)
+        {
+            result[i] = DeserializeGenome(table[i], geneManager);
+        }
+        return result;
+    }
+
+    private static PlantGenome LookupGenome(PlantGenome[] genomes, int index)
+    {
+        return index >= 0 && index < genomes.Length ? genomes[index] : null;
+    }
+
     private static void ApplySnapshot(
         SimulationSnapshot snapshot,
+        PlantGenome[] genomes,
         TimeController timeController,
         MapManager mapManager,
         EnvironmentManager environmentManager,
@@ -178,18 +282,9 @@ public static class SimulationLoadSystem
         grassManager.activeGrassInstances.Clear();
         seedManager.activeSeeds.Clear();
 
-        long loadedPlantCount = 0;
-        long loadedSeedCount = 0;
-
+        // Terrain and per-tile environment
         Dictionary<long, TileState> tileLookup = BuildTileLookup(snapshot.tiles);
         List<Vector3Int> allTiles = mapManager.GetAllTilePositions();
-
-        GeneManager geneManager = UnityEngine.Object.FindFirstObjectByType<GeneManager>();
-        if (geneManager == null)
-        {
-            Debug.LogWarning("GeneManager not found during load. Loaded genomes will use fallback phenotype defaults.");
-        }
-
         for (int i = 0; i < allTiles.Count; i++)
         {
             Vector3Int tilePos = allTiles[i];
@@ -202,55 +297,71 @@ public static class SimulationLoadSystem
             if (tileState != null)
             {
                 env.oxygen = tileState.oxygen;
+                if (snapshot.schemaVersion >= 7)
+                {
+                    env.soilOrganicCarbon = Mathf.Max(0f, tileState.soilOrganicCarbon);
+                    env.dissolvedCarbon = Mathf.Max(0f, tileState.dissolvedCarbon);
+                    env.availableNitrogen = Mathf.Max(0f, tileState.availableNitrogen);
+                    env.availablePhosphorus = Mathf.Max(0f, tileState.availablePhosphorus);
+                    env.availablePotassium = Mathf.Max(0f, tileState.availablePotassium);
+                }
             }
             env.grass = null;
+        }
 
-            if (tileState != null && tileState.grass != null)
+        // Plants
+        long loadedPlantCount = 0;
+        if (snapshot.plants != null)
+        {
+            for (int i = 0; i < snapshot.plants.Count; i++)
             {
-                if (TryGetGenomeStateInvalidReason(tileState.grass.genome, out _))
-                {
-                }
-                else
-                {
-                    GrassInstance grass = DeserializeGrass(tileState.grass, tilePos, geneManager);
-                    if (grass != null)
-                    {
-                        env.grass = grass;
-                        grassManager.activeGrassInstances[tilePos] = grass;
-                        loadedPlantCount++;
-                    }
-                }
+                GrassState state = snapshot.plants[i];
+                if (state == null)
+                    continue;
+
+                Vector3Int tilePos = new Vector3Int(state.tileX, state.tileY, 0);
+                PlantGenome genome = LookupGenome(genomes, state.genomeIndex);
+                if (genome == null || !mapManager.IsValidTilePosition(tilePos))
+                    continue;
+
+                EnvironmentData env = mapManager.GetTileEnvironmentData(tilePos);
+                if (env.grass != null)
+                    continue; // Duplicate entry for a tile; keep the first
+
+                GrassInstance grass = DeserializeGrass(state, tilePos, genome, LookupGenome(genomes, state.seedGenomeIndex));
+                env.grass = grass;
+                grassManager.activeGrassInstances[tilePos] = grass;
+                loadedPlantCount++;
             }
+        }
 
-            mapManager.UpdateGrassTile(env, tilePos);
+        for (int i = 0; i < allTiles.Count; i++)
+        {
+            mapManager.UpdateGrassTile(mapManager.GetTileEnvironmentData(allTiles[i]), allTiles[i]);
+        }
 
-            if (tileState != null && tileState.seeds != null && tileState.seeds.Count > 0)
+        // Seeds
+        long loadedSeedCount = 0;
+        if (snapshot.seeds != null)
+        {
+            for (int i = 0; i < snapshot.seeds.Count; i++)
             {
-                List<Seed> seeds = new List<Seed>(tileState.seeds.Count);
-                for (int s = 0; s < tileState.seeds.Count; s++)
+                SeedState state = snapshot.seeds[i];
+                if (state == null)
+                    continue;
+
+                Vector3Int tilePos = new Vector3Int(state.tileX, state.tileY, 0);
+                PlantGenome genome = LookupGenome(genomes, state.genomeIndex);
+                if (genome == null || !mapManager.IsValidTilePosition(tilePos))
+                    continue;
+
+                if (!seedManager.activeSeeds.TryGetValue(tilePos, out List<Seed> seeds))
                 {
-                    SeedState seedState = tileState.seeds[s];
-                    if (seedState == null)
-                        continue;
-
-                    if (TryGetGenomeStateInvalidReason(seedState.carriedGenome, out _))
-                    {
-                        continue;
-                    }
-
-                    Seed seed = DeserializeSeed(seedState, geneManager);
-                    if (seed.carriedGenome == null)
-                    {
-                        continue;
-                    }
-                    seeds.Add(seed);
-                    loadedSeedCount++;
-                }
-
-                if (seeds.Count > 0)
-                {
+                    seeds = new List<Seed>();
                     seedManager.activeSeeds[tilePos] = seeds;
                 }
+                seeds.Add(DeserializeSeed(state, genome));
+                loadedSeedCount++;
             }
         }
 
@@ -271,14 +382,18 @@ public static class SimulationLoadSystem
 
         if (snapshot.time != null)
         {
+            bool hasExactDayPhase = snapshot.schemaVersion >= 8;
             float loadedBaseLight = snapshot.environment != null ? snapshot.environment.baseLightLevel : environmentManager.baseLightLevel;
-            timeController.ApplyLoadedTimeState(
-                snapshot.time.simDaysSinceStart,
-                snapshot.time.accumulatedAge,
-                snapshot.time.isNight,
-                snapshot.time.totalSimulatedTimeSeconds,
-                snapshot.time.noonTimeHours,
-                loadedBaseLight);
+            timeController.ApplyLoadedTimeState(snapshot.time, loadedBaseLight, hasExactDayPhase);
+
+            SeasonManager seasonManager = UnityEngine.Object.FindFirstObjectByType<SeasonManager>();
+            if (seasonManager != null)
+            {
+                int season = hasExactDayPhase
+                    ? snapshot.time.currentSeason
+                    : seasonManager.FindClosestSeasonByTemperature(environmentManager.seasonalTemperatureOffset);
+                seasonManager.ApplyLoadedSeason(season);
+            }
         }
 
         // Recompute tile-level environment from restored base settings/topology instead of loading cached per-tile values.
@@ -308,6 +423,7 @@ public static class SimulationLoadSystem
         target.baseLightLevel = source.baseLightLevel;
         target.waterMaxLightLevel = source.waterMaxLightLevel;
         target.landMaxLightLevel = source.landMaxLightLevel;
+        target.atmosphericCarbon = Mathf.Max(0f, source.atmosphericCarbon);
     }
 
     private static void ApplyGrassSettings(GrassSettingsState source, GrassManager target, SeedManager seedTarget)
@@ -320,6 +436,7 @@ public static class SimulationLoadSystem
         target.agingRate = source.agingRate;
         target.baseGrowthCost = source.baseGrowthCost;
         target.flowerLimit = source.flowerLimit;
+        target.maxCloneAttemptsPerDay = Mathf.Max(0, source.maxCloneAttemptsPerDay);
         seedTarget.maxSeedsPerTile = source.maxSeedsPerTile;
     }
 
@@ -344,18 +461,8 @@ public static class SimulationLoadSystem
         return ((long)x << 32) | (uint)y;
     }
 
-    private static GrassInstance DeserializeGrass(GrassState source, Vector3Int tilePos, GeneManager geneManager)
+    private static GrassInstance DeserializeGrass(GrassState source, Vector3Int tilePos, PlantGenome genome, PlantGenome seedGenome)
     {
-        if (source == null)
-            return null;
-
-        if (TryGetGenomeStateInvalidReason(source.genome, out _))
-            return null;
-
-        PlantGenome genome = DeserializeGenome(source.genome, geneManager);
-        if (genome == null)
-            return null;
-
         GrassInstance grass = new GrassInstance(tilePos, genome, source.energyStored);
         grass.energyStored = source.energyStored;
         grass.grassDensity = source.grassDensity;
@@ -371,28 +478,35 @@ public static class SimulationLoadSystem
         grass.lastFlowerMonth = source.lastFlowerMonth;
         grass.maturityThreshold = source.maturityThreshold;
         grass.seedingEnergy = source.seedingEnergy;
+        grass.nightEffect = source.nightEffect > 0f ? source.nightEffect : 1f;
+        grass.lastCloneDay = source.lastCloneDay;
+        grass.cloneAttemptsToday = Mathf.Max(0, source.cloneAttemptsToday);
+        grass.ageingExposureToday = Mathf.Max(0f, source.ageingExposureToday);
+        grass.dormantTimeToday = Mathf.Max(0f, source.dormantTimeToday);
+        grass.daylightPotentialSum = Mathf.Max(0f, source.daylightPotentialSum);
+        grass.daylightSampleTime = Mathf.Max(0f, source.daylightSampleTime);
         grass.usedPhotosynthesisLastTick = source.usedPhotosynthesisLastTick;
         grass.usedRespirationLastTick = source.usedRespirationLastTick;
-        grass.seedGenome = DeserializeGenome(source.seedGenome, geneManager);
+        grass.seedGenome = seedGenome;
+        if (grass.IsSeeding && grass.seedGenome == null)
+        {
+            grass.reproductiveState = ReproductiveState.None; // A seeding plant without a seed genome could never disperse
+        }
         return grass;
     }
 
-    private static Seed DeserializeSeed(SeedState source, GeneManager geneManager)
+    private static Seed DeserializeSeed(SeedState source, PlantGenome genome)
     {
-        if (source == null)
-            return default;
-
-        if (TryGetGenomeStateInvalidReason(source.carriedGenome, out _))
-            return default;
-
         return new Seed
         {
+            carriedGenome = genome,
             parentGenus = source.parentGenus,
             storedEnergy = source.storedEnergy,
             germinationEnergy = source.germinationEnergy,
             germinationStage = source.germinationStage,
             sproutStage = source.sproutStage,
-            carriedGenome = DeserializeGenome(source.carriedGenome, geneManager)
+            germinationCue = source.germinationCue,
+            coldPreservation = source.coldPreservation
         };
     }
 
@@ -406,6 +520,7 @@ public static class SimulationLoadSystem
             genus = source.genus,
             species = source.species,
             origin = source.origin,
+            speciesGuid = string.IsNullOrWhiteSpace(source.speciesGuid) ? null : source.speciesGuid,
             generation = source.generation,
             genusColor = source.genusColor != null
                 ? new Color(source.genusColor.r, source.genusColor.g, source.genusColor.b, source.genusColor.a)
@@ -424,7 +539,7 @@ public static class SimulationLoadSystem
         }
         else
         {
-            genome.phenotypes = new float[TraitId.SeedingProportion + 1];
+            genome.phenotypes = new float[TraitId.Count];
         }
 
         return genome;
@@ -438,12 +553,7 @@ public static class SimulationLoadSystem
             return true;
         }
 
-        if (string.IsNullOrWhiteSpace(source.origin) && (string.IsNullOrWhiteSpace(source.genus) || string.IsNullOrWhiteSpace(source.species)))
-        {
-            reason = "origin and taxonomy are blank";
-            return true;
-        }
-
+        // Names are optional labels; DNA is what makes a genome restorable
         bool hasMaternal = source.maternalDNA != null && source.maternalDNA.Count > 0;
         bool hasPaternal = source.paternalDNA != null && source.paternalDNA.Count > 0;
         if (!hasMaternal && !hasPaternal)

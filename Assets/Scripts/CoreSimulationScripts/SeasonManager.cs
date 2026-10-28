@@ -199,6 +199,37 @@ public class SeasonManager : MonoBehaviour
         }
     }
 
+    internal int CurrentSeason => currentSeason;
+
+    /// <summary>
+    /// Restores the selected season after a load. The loader has already restored the temperature offset and
+    /// noon length (possibly mid-transition values), so this only updates the selection and UI; an in-progress
+    /// transition is not resumed.
+    /// </summary>
+    internal void ApplyLoadedSeason(int seasonIndex)
+    {
+        StopSeasonTransition();
+        currentSeason = Mathf.Clamp(seasonIndex, 0, seasons.Count - 1);
+        UpdateSeasonButtonVisuals();
+    }
+
+    /// <summary>
+    /// Best guess of the season for saves that predate storing it: the one whose target temperature is closest.
+    /// </summary>
+    internal int FindClosestSeasonByTemperature(float seasonalTemperatureOffset)
+    {
+        int closest = 0;
+        for (int i = 1; i < seasons.Count; i++)
+        {
+            if (Mathf.Abs(seasons[i].targetTemperature - seasonalTemperatureOffset)
+                < Mathf.Abs(seasons[closest].targetTemperature - seasonalTemperatureOffset))
+            {
+                closest = i;
+            }
+        }
+        return closest;
+    }
+
     private void UpdateSeasonButtonVisuals()
     {
         if (seasonButtons == null || seasonButtons.Length == 0)

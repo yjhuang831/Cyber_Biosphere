@@ -22,6 +22,30 @@ public class EnvironmentVisualizer : MonoBehaviour
 
     void Start()
     {
+        if (mapManager == null || mapManager.environmentManager == null)
+        {
+            Debug.LogError("EnvironmentVisualizer requires MapManager and EnvironmentManager references.", this);
+            enabled = false;
+            return;
+        }
+
+        if (toggleButtons == null || toggleButtons.Length < 6)
+        {
+            Debug.LogError("EnvironmentVisualizer requires six toggle buttons in Temperature, Hydration, Light, Radiation, Oxygen, Genus order.", this);
+            enabled = false;
+            return;
+        }
+
+        for (int i = 0; i < 6; i++)
+        {
+            if (toggleButtons[i] == null)
+            {
+                Debug.LogError("EnvironmentVisualizer toggle button " + i + " is not assigned.", this);
+                enabled = false;
+                return;
+            }
+        }
+
         toggleButtons[0].onClick.AddListener(() => ToggleVisualization("Temperature"));
         toggleButtons[1].onClick.AddListener(() => ToggleVisualization("Hydration"));
         toggleButtons[2].onClick.AddListener(() => ToggleVisualization("Light"));
@@ -32,10 +56,10 @@ public class EnvironmentVisualizer : MonoBehaviour
 
     void ToggleVisualization(string factor)
     {
-        temperatureSliderGroup.SetActive(false);
-        hydrationSliderGroup.SetActive(false);
-        lightSliderGroup.SetActive(false);
-        radiationSliderGroup.SetActive(false);
+        SetActiveIfAssigned(temperatureSliderGroup, false);
+        SetActiveIfAssigned(hydrationSliderGroup, false);
+        SetActiveIfAssigned(lightSliderGroup, false);
+        SetActiveIfAssigned(radiationSliderGroup, false);
 
         if (activeVisualization == factor)
         {
@@ -49,16 +73,16 @@ public class EnvironmentVisualizer : MonoBehaviour
             switch (activeVisualization)
             {
                 case "Temperature":
-                    temperatureSliderGroup.SetActive(true);
+                    SetActiveIfAssigned(temperatureSliderGroup, true);
                     break;
                 case "Hydration":
-                    hydrationSliderGroup.SetActive(true);
+                    SetActiveIfAssigned(hydrationSliderGroup, true);
                     break;
                 case "Light":
-                    lightSliderGroup.SetActive(true);
+                    SetActiveIfAssigned(lightSliderGroup, true);
                     break;
                 case "Radiation":
-                    radiationSliderGroup.SetActive(true);
+                    SetActiveIfAssigned(radiationSliderGroup, true);
                     break;
             }
         }
@@ -67,11 +91,21 @@ public class EnvironmentVisualizer : MonoBehaviour
     IEnumerator ResetTilesCoroutine()
     {
         yield return new WaitForEndOfFrame();
-        mapManager.ResetOverlay();
+        if (mapManager != null)
+            mapManager.ResetOverlay();
+    }
+
+    private static void SetActiveIfAssigned(GameObject target, bool active)
+    {
+        if (target != null)
+            target.SetActive(active);
     }
 
     public Color VisualizeFactor(EnvironmentData data)
     {
+        if (data == null)
+            return Color.clear;
+
         Color tileColor = Color.white;
         switch (activeVisualization)
         {
@@ -81,22 +115,22 @@ public class EnvironmentVisualizer : MonoBehaviour
                     mapManager.environmentManager.maxTemperature,
                     data.temperature
                 );
-                tileColor = Color.Lerp(temperatureGradient[0], temperatureGradient[1], tempNormalized);
+                tileColor = BlendGradient(temperatureGradient, tempNormalized);
                 break;
             case "Hydration":
-                tileColor = Color.Lerp(hydrationGradient[0], hydrationGradient[1], data.hydration / 100f);
+                tileColor = BlendGradient(hydrationGradient, data.hydration / 100f);
                 break;
 
             case "Light":
-                tileColor = Color.Lerp(lightGradient[0], lightGradient[1], data.light);
+                tileColor = BlendGradient(lightGradient, data.light);
                 break;
 
             case "Radiation":
-                tileColor = Color.Lerp(radiationGradient[0], radiationGradient[1], data.radiation);
+                tileColor = BlendGradient(radiationGradient, data.radiation);
                 break;
 
             case "Oxygen":
-                tileColor = Color.Lerp(oxygenGradient[0], oxygenGradient[1], data.oxygen / 100f);
+                tileColor = BlendGradient(oxygenGradient, data.oxygen / 100f);
                 break;
             case "Genus":
                 if (data.grass != null) {
@@ -111,5 +145,13 @@ public class EnvironmentVisualizer : MonoBehaviour
 
         tileColor.a = 0.8f;
         return tileColor;
+    }
+
+    private static Color BlendGradient(Color[] gradient, float value)
+    {
+        if (gradient == null || gradient.Length < 2)
+            return Color.white;
+
+        return Color.Lerp(gradient[0], gradient[1], Mathf.Clamp01(value));
     }
 }

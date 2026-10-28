@@ -392,7 +392,7 @@ public class SharedUIPanelManager : MonoBehaviour
 
         string filePath = GetPlayerPreferencePath();
         string json = JsonUtility.ToJson(newPreferences, prettyPrint: true);
-        File.WriteAllText(filePath, json);
+        SaveFileUtility.WriteAllTextAtomic(filePath, json);
     }
 
     internal void LoadPlayerPreferences()

@@ -38,7 +38,8 @@ public class DetailedInformationPanelController : MonoBehaviour
     private Vector3Int currentPos;
     private bool isOpen = false;
     private float refreshTimer = 0f;
-    private const float LIGHT_ACTIVITY_THRESHOLD = 0.01f;
+    private TimeController timeController; // Found lazily; supplies germination steps per day for seed estimates
+    private const float LIGHT_ACTIVITY_THRESHOLD = 0.01f; // Same daylight cut-off as GrassInstance.PerformMetabolism
     private const float DISPLAY_LUX_PER_LIGHT_UNIT = 100000f;
     private const float DISPLAY_USVH_PER_RADIATION_UNIT = 0.6f;
 
@@ -207,19 +208,20 @@ public class DetailedInformationPanelController : MonoBehaviour
 
         if (GenusManager.Instance != null)
         {
-            bool success = GenusManager.Instance.SaveLocalSpeciesGenome(currentData.grass.genome, genus, species);
+            // A clashing name is saved with a numeric suffix; log the name actually used
+            bool success = GenusManager.Instance.SaveLocalSpeciesGenome(currentData.grass.genome, genus, species, out GenusManager.SpeciesEntry savedEntry);
             if (success)
             {
-                Debug.Log("Species saved: " + genus + " " + species);
+                // The saved plant becomes the species' founding specimen in this simulation
+                if (mapManager != null && mapManager.grassManager != null)
+                {
+                    mapManager.grassManager.AssignSpecimenToSpecies(currentData.grass, savedEntry.guid, savedEntry.genus, savedEntry.species);
+                }
+                Debug.Log("Species saved: " + savedEntry.DisplayName);
             }
         }
 
         CloseSaveSpeciesPanel();
-
-        if (GenusManager.Instance != null)
-        {
-            GenusManager.Instance.LoadLocalSpeciesReferences();
-        }
     }
 
     private void RefreshAllTexts()
@@ -270,7 +272,9 @@ public class DetailedInformationPanelController : MonoBehaviour
             result += "[" + (i + 1) + "] " +
                 "Stored: " + seed.storedEnergy.ToString("F2") +
                 " | Germ: " + seed.germinationEnergy.ToString("F2") +
-                " | Stage: " + seed.germinationStage + "/" + seed.sproutStage;
+                " | Stage: " + seed.germinationStage + "/" + seed.sproutStage +
+                (seed.germinationCue > 0f ? " | Cue: " + seed.germinationCue.ToString("F2") : "") +
+                (seed.coldPreservation > 0f ? " | Cold: " + FormatPercent(seed.coldPreservation * 100f) : "");
         }
 
         seedInfoText.text = result;
@@ -284,7 +288,7 @@ public class DetailedInformationPanelController : MonoBehaviour
         GrassInstance grass = currentData.grass;
         if (grass == null || grass.genome == null)
         {
-            grassInfoText.text = "No grass.";
+            grassInfoText.text = "No plant on this tile.";
             if (saveSpeciesButton != null)
                 saveSpeciesButton.gameObject.SetActive(false);
             return;
@@ -294,25 +298,10 @@ public class DetailedInformationPanelController : MonoBehaviour
         if (saveSpeciesButton != null)
             saveSpeciesButton.gameObject.SetActive(true);
 
-        string header = FormatOriginHeader(grass.genome.origin, grass.genome.genus, grass.genome.species);
-
-        grassInfoText.text = header + "\n\n" + BuildPhenotypeText(grass.genome, currentData);
-    }
-
-    private static string FormatOriginHeader(string originRaw, string genusRaw, string speciesRaw)
-    {
-        string origin = string.IsNullOrWhiteSpace(originRaw)
-            ? (string.IsNullOrWhiteSpace(genusRaw) || string.IsNullOrWhiteSpace(speciesRaw)
-                ? "Unknown origin"
-                : (genusRaw.Trim() + " " + speciesRaw.Trim()))
-            : originRaw.Trim();
-
-        if (string.IsNullOrWhiteSpace(origin))
-        {
-            origin = "Unknown origin";
-        }
-
-        return "<b><size=115%>" + origin + "</size></b>";
+        if (timeController == null)
+            timeController = FindFirstObjectByType<TimeController>();
+        GrassManager grassManager = mapManager != null ? mapManager.grassManager : null;
+        grassInfoText.text = BuildPlantReport(grass, currentData, grassManager, timeController);
     }
 
     private void UpdateExtraInfo()
@@ -549,282 +538,395 @@ public class DetailedInformationPanelController : MonoBehaviour
         }
     }
 
-    private static string BuildPhenotypeText(PlantGenome genome, EnvironmentData envData = null)
+    // ---- Plant tab ----
+    // Every number here comes from the simulation's own formulas (GrassInstance.CalculatePhotosynthesis and
+    // EstimateEnergyBudget), so the panel cannot drift from what the plant actually does.
+    // Energy rates are per sim second; durations are in sim hours/days.
+
+    private const float DEFAULT_METABOLISM_COST_PER_ALLELE = 0.01f;
+    private const float DEFAULT_BASE_GROWTH_COST = 0.5f;
+    private const float POOR_FIT = 0.45f;
+    private const string GOOD_COLOR = "#00DD66";
+    private const string WARN_COLOR = "#FFCC33";
+    private const string BAD_COLOR = "#FF6666";
+    private const string MUTED_COLOR = "#999999";
+
+    private static string BuildPlantReport(GrassInstance grass, EnvironmentData envData, GrassManager grassManager, TimeController timeController)
     {
-        if (genome == null || genome.phenotypes == null || genome.phenotypes.Length == 0)
-            return "Phenotypes: none.";
+        float costPerGene = grassManager != null ? grassManager.metabolismCostPerAllele : DEFAULT_METABOLISM_COST_PER_ALLELE;
+        float baseGrowthCost = grassManager != null ? grassManager.baseGrowthCost : DEFAULT_BASE_GROWTH_COST;
+        GrassInstance.EnergyBudget budget = grass.EstimateEnergyBudget(envData, costPerGene, baseGrowthCost);
+        GrassInstance.PhotosynthesisFactors factors = grass.CalculatePhotosynthesis(envData);
 
-        StringBuilder text = new StringBuilder(640);
-
-        text.Append("<b>[STATUS]</b>\n");
-        if (envData != null && envData.grass != null)
-        {
-            AppendPlantStatus(text, envData.grass, genome);
-        }
-        else
-        {
-            text.Append("  No live grass state data.\n");
-        }
-
-        text.Append("\n<b>[ENVIRONMENT FIT]</b>\n");
-        AppendEnvironmentFit(text, genome, envData);
-
-        text.Append("\n<b>[ENERGY FLOW]</b>\n");
-        AppendEnergyFlow(text, genome, envData);
-
-        text.Append("\n<b>[REPRODUCTION]</b>\n");
-        AppendReproduction(text, genome, envData);
-
+        StringBuilder text = new StringBuilder(2048);
+        AppendIdentity(text, grass);
+        text.Append("\n<b>NOW</b>\n");
+        AppendCondition(text, grass, envData, budget, factors);
+        text.Append("\n<b>HABITAT FIT</b> ").Append(Colored(MUTED_COLOR, "(100% = ideal for this plant)")).Append('\n');
+        AppendHabitat(text, grass, envData, factors);
+        text.Append("\n<b>ENERGY PER SECOND</b>\n");
+        AppendEnergyBudget(text, grass, envData, budget);
+        text.Append("\n<b>REPRODUCTION</b>\n");
+        AppendReproduction(text, grass, grassManager, timeController);
         return text.ToString().TrimEnd();
     }
 
-    private static void AppendPlantStatus(StringBuilder text, GrassInstance grass, PlantGenome genome)
+    private static void AppendIdentity(StringBuilder text, GrassInstance grass)
     {
-        text.Append("  State: ").Append(GetStateLabel(grass)).Append('\n');
-        text.Append("  Generation: ").Append(Mathf.Max(0, genome.generation)).Append('\n');
-        text.Append("  Age: ").Append(grass.age).Append(" days");
-        text.Append(" | Aging load ").Append(CalculateAgingLoadPerSecond(grass, genome).ToString("F2")).Append(" J/s");
-        text.Append('\n');
+        PlantGenome genome = grass.genome;
+        bool named = !string.IsNullOrWhiteSpace(genome.genus) && !string.IsNullOrWhiteSpace(genome.species);
+        string title = named ? genome.genus.Trim() + " " + genome.species.Trim() : "Unnamed plant";
+        text.Append("<b><size=115%>").Append(title).Append("</size></b>\n");
 
-        text.Append("  Energy: ")
-            .Append(CreateBar(grass.energyStored / 100f, 12))
-            .Append(' ')
-            .Append(grass.energyStored.ToString("F1"))
-            .Append(" / 100 kJ\n");
-
-        text.Append("  Density: ")
-            .Append(CreateBar(grass.grassDensity, 12))
-            .Append(' ')
-            .Append((grass.grassDensity * 100f).ToString("F1"))
-            .Append("% (")
-            .Append(GetDensityStage(grass.grassDensity))
-            .Append(")\n");
-
-        text.Append("  Type: ").Append(genome.GetPlantType()).Append('\n');
-    }
-
-    private static float CalculateAgingLoadPerSecond(GrassInstance grass, PlantGenome genome)
-    {
-        if (grass == null || genome == null)
-            return 0f;
-
-        float nightEfficiency = genome.GetTraitValue(TraitId.NightGrowthEfficiency);
-        float nightFactor = (TimeController.isNight && nightEfficiency > 0.0001f) ? nightEfficiency : 1f;
-        float agingLoadPerSecond = grass.ageEffect * grass.dormancyEffect * nightFactor * grass.grassDensity;
-        return Mathf.Max(0f, agingLoadPerSecond);
-    }
-
-    private static void AppendEnvironmentFit(StringBuilder text, PlantGenome genome, EnvironmentData envData)
-    {
-        float lightReq = Mathf.Max(0.0001f, genome.GetTraitValue(TraitId.LightRequirement));
-        float hydrationReq = Mathf.Max(0.0001f, genome.GetTraitValue(TraitId.HydrationRequirement));
-        float tempOpt = genome.GetTraitValue(TraitId.TemperatureTolerance);
-
-        if (envData == null || envData.grass == null)
+        string lineage = ResolveLineageName(genome.speciesGuid);
+        if (lineage != null && lineage != title)
         {
-            text.Append("  Light req: ").Append(FormatLux(lightReq)).Append('\n');
-            text.Append("  Water req: ").Append(FormatPercent(hydrationReq)).Append('\n');
-            text.Append("  Temp opt: ").Append(FormatTemperatureCelsius(tempOpt)).Append('\n');
-            return;
+            text.Append("Descended from library species ").Append(lineage).Append('\n');
         }
 
-        EnergyDiagnostics diagnostics = CalculateEnergyDiagnostics(genome, envData);
-        float lightScore = Mathf.Clamp01(diagnostics.lightEfficiency);
-        float hydrationScore = Mathf.Clamp01(diagnostics.hydrationEfficiency);
-        float tempScore = Mathf.Clamp01(diagnostics.temperatureMultiplier);
-        float habitatScore = (lightScore + hydrationScore + tempScore) / 3f;
-
-        string limitingFactor = "Light";
-        float limitingScore = lightScore;
-        if (hydrationScore < limitingScore)
-        {
-            limitingScore = hydrationScore;
-            limitingFactor = "Water";
-        }
-        if (tempScore < limitingScore)
-        {
-            limitingFactor = "Temperature";
-            limitingScore = tempScore;
-        }
-
-        text.Append("  Habitat score: ").Append(FormatScore(habitatScore))
-            .Append(" | Limiting: ").Append(limitingFactor).Append(' ').Append(FormatScore(limitingScore)).Append('\n');
-        text.Append("  Light: ").Append(FormatLux(envData.light)).Append(" / ").Append(FormatLux(lightReq))
-            .Append(" (").Append(DescribeRelative(envData.light, lightReq, "low", "excess")).Append(", ")
-            .Append(FormatScore(lightScore)).Append(")\n");
-        text.Append("  Water: ").Append(FormatPercent(envData.hydration)).Append(" / ").Append(FormatPercent(hydrationReq))
-            .Append(" (").Append(DescribeRelative(envData.hydration, hydrationReq, "dry", "wet")).Append(", ")
-            .Append(FormatScore(hydrationScore)).Append(")\n");
-        text.Append("  Temp: ").Append(FormatTemperatureCelsius(envData.temperature)).Append(" / ").Append(FormatTemperatureCelsius(tempOpt))
-            .Append(" (").Append(DescribeTemperature(envData.temperature, tempOpt)).Append(", ")
-            .Append(FormatScore(tempScore)).Append(")\n");
-        text.Append("  Radiation: ").Append(FormatRadiationRate(envData.radiation))
-            .Append(" | Oxygen: ").Append(FormatPercent(envData.oxygen)).Append('\n');
+        string ancestry = string.IsNullOrWhiteSpace(genome.origin) ? "unknown" : genome.origin.Trim();
+        text.Append("Ancestry: ").Append(ancestry).Append(" · Generation ").Append(Mathf.Max(0, genome.generation)).Append('\n');
+        text.Append(DescribePlantType(genome.GetPlantType())).Append(" · ").Append(genome.GetDominantDNALocusCount()).Append(" genes\n");
     }
 
-    private static void AppendEnergyFlow(StringBuilder text, PlantGenome genome, EnvironmentData envData)
+    private static string ResolveLineageName(string speciesGuid)
     {
-        float respirationRate = genome.GetTraitValue(TraitId.RespirationRate);
+        if (string.IsNullOrEmpty(speciesGuid))
+            return null;
+        GenusManager genusManager = FindFirstObjectByType<GenusManager>();
+        if (genusManager != null && genusManager.TryGetSpeciesEntry(speciesGuid, out GenusManager.SpeciesEntry entry))
+            return entry.DisplayName;
+        return "(no longer in library)";
+    }
+
+    private static string DescribePlantType(string plantType)
+    {
+        switch (plantType)
+        {
+            case "dryTolerant": return "Dry-adapted (needs < 30% water)";
+            case "wetTolerant": return "Wet-adapted (needs > 70% water)";
+            default: return "Moderate water needs";
+        }
+    }
+
+    private static void AppendCondition(StringBuilder text, GrassInstance grass, EnvironmentData envData,
+        GrassInstance.EnergyBudget budget, GrassInstance.PhotosynthesisFactors factors)
+    {
+        text.Append("  State: ").Append(DescribeState(grass)).Append('\n');
+        text.Append("  Age: ").Append(grass.age).Append(grass.age == 1 ? " day\n" : " days\n");
+        text.Append("  Energy: ").Append(CreateBar(grass.energyStored / 100f, 12)).Append(' ')
+            .Append(grass.energyStored.ToString("F1")).Append(" / 100, ").Append(DescribeTrend(grass, budget)).Append('\n');
+        text.Append("  Size: ").Append(CreateBar(grass.grassDensity, 12)).Append(' ')
+            .Append((grass.grassDensity * 100f).ToString("F0")).Append("% (").Append(GetDensityStage(grass.grassDensity)).Append(")\n");
+
+        List<string> warnings = CollectWarnings(grass, envData, budget, factors);
+        if (warnings.Count == 0)
+        {
+            text.Append("  ").Append(Colored(GOOD_COLOR, "No problems.")).Append('\n');
+        }
+        for (int i = 0; i < warnings.Count; i++)
+        {
+            text.Append("  ").Append(Colored(BAD_COLOR, "! " + warnings[i])).Append('\n');
+        }
+    }
+
+    private static string DescribeState(GrassInstance grass)
+    {
+        if (grass.IsDormant)
+            return Colored(WARN_COLOR, "Dormant") + " - resting; costs cut to " + (grass.dormancyEffect * 100f).ToString("0.##") + "%; checks each dawn whether to wake";
+        if (grass.IsSeeding)
+            return Colored(GOOD_COLOR, "Seeding") + " - pollinated; part of its growth energy goes into seeds";
+        if (grass.IsFlowering)
+            return Colored(GOOD_COLOR, "Flowering") + " (day " + grass.floweringDays + ") - sending and receiving pollen";
+        return "Active - growing and storing energy";
+    }
+
+    private static string DescribeTrend(GrassInstance grass, GrassInstance.EnergyBudget budget)
+    {
+        float net = budget.Net;
+        if (net > 0.005f)
+        {
+            string full = grass.energyStored < 100f ? ", full in " + FormatSimDuration((100f - grass.energyStored) / net) : "";
+            return Colored(GOOD_COLOR, "gaining " + FormatSigned(net) + "/s" + full);
+        }
+        if (net < -0.005f)
+        {
+            string wilt = grass.energyStored > WILTING_ENERGY ? ", wilts in " + FormatSimDuration((grass.energyStored - WILTING_ENERGY) / -net) : "";
+            return Colored(BAD_COLOR, "losing " + FormatSigned(net) + "/s" + wilt);
+        }
+        return Colored(WARN_COLOR, "steady");
+    }
+
+    private const float WILTING_ENERGY = 5f; // Below this a plant shrinks instead of spending energy (GrassInstance.PerformMetabolism)
+
+    private static List<string> CollectWarnings(GrassInstance grass, EnvironmentData envData,
+        GrassInstance.EnergyBudget budget, GrassInstance.PhotosynthesisFactors factors)
+    {
+        List<string> warnings = new List<string>();
+        PlantGenome genome = grass.genome;
+        bool isDay = envData.light > LIGHT_ACTIVITY_THRESHOLD;
+
+        if (grass.IsDormant)
+        {
+            warnings.Add("Dormant for " + grass.dormancyTimer + " of the " + grass.maxDormantTime + " days it can survive dormant");
+            float wakeAbove = genome.GetTraitValue(TraitId.DormancyTrigger) * GrassInstance.DORMANCY_EXIT_MARGIN;
+            float soFar = grass.DaylightPotentialAverage;
+            warnings.Add("Wakes at dawn if today's daylight average beats " + wakeAbove.ToString("F2")
+                + (soFar >= 0f ? " (so far " + soFar.ToString("F2") + ")" : " (no daylight yet today)"));
+        }
+        else if (grass.energyStored <= WILTING_ENERGY + 0.5f && grass.age > 1)
+        {
+            warnings.Add("Wilting: out of energy, losing 1% size per second");
+        }
+
+        if (factors.hydrationEfficiency < POOR_FIT)
+        {
+            warnings.Add(envData.hydration < genome.GetTraitValue(TraitId.HydrationRequirement) ? "Too dry for this plant" : "Too wet for this plant");
+        }
+        if (factors.temperatureMultiplier < POOR_FIT)
+        {
+            warnings.Add(envData.temperature < genome.GetTraitValue(TraitId.TemperatureTolerance) ? "Too cold for this plant" : "Too hot for this plant");
+        }
+        if (isDay && factors.lightEfficiency < POOR_FIT)
+        {
+            warnings.Add(envData.light < genome.GetTraitValue(TraitId.LightRequirement) ? "Too dark for this plant" : "Too bright for this plant");
+        }
+
+        // Dormancy is decided at dawn from the day's daylight average (GrassInstance.DailyDormancyDecision)
         float dormancyTrigger = genome.GetTraitValue(TraitId.DormancyTrigger);
-        float nightEfficiency = genome.GetTraitValue(TraitId.NightGrowthEfficiency);
-
-        if (envData == null || envData.grass == null)
+        float daylightAverage = grass.DaylightPotentialAverage;
+        if (!grass.IsDormant && dormancyTrigger > 0.0001f && daylightAverage >= 0f && grass.grassDensity >= grass.maturityThreshold && daylightAverage < dormancyTrigger)
         {
-            text.Append("  Respiration rate: ").Append(respirationRate.ToString("F2")).Append('\n');
-            text.Append("  Dormancy trigger: ").Append(dormancyTrigger.ToString("F2")).Append('\n');
-            text.Append("  Night efficiency: ").Append(nightEfficiency.ToString("F2")).Append('\n');
-            return;
+            warnings.Add("Today so far: " + daylightAverage.ToString("F2") + " vs dormancy trigger " + dormancyTrigger.ToString("F2") + " - goes dormant at dawn if it stays below");
         }
 
-        GrassInstance grass = envData.grass;
-        EnergyDiagnostics diagnostics = CalculateEnergyDiagnostics(genome, envData);
-        float netPotential = diagnostics.netPotential;
-        string mode = GetEnergyMode(grass, diagnostics);
-
-        text.Append("  Mode: ").Append(mode).Append('\n');
-        text.Append("  Daylight: ").Append(diagnostics.isDaylight ? "yes" : "no")
-            .Append(" (").Append(FormatLux(envData.light)).Append(")\n");
-        text.Append("  Respiration rule: dark only, and only below trigger.\n");
-        text.Append("  Photosynthesis (active): ").Append(FormatSigned(diagnostics.activePhotosynthesis)).Append(" J/s");
-        if (!diagnostics.photosynthesisActive)
-            text.Append(" (off)");
-        text.Append('\n');
-        text.Append("  Respiration (active): -").Append(diagnostics.activeRespiration.ToString("F2")).Append(" J/s");
-        if (!diagnostics.respirationActive)
-            text.Append(" (off)");
-        text.Append('\n');
-        text.Append("  Respiration trigger: ").Append(diagnostics.respirationTrigger.ToString("F2")).Append(" kJ")
-            .Append(" | Energy ").Append(grass.energyStored.ToString("F1")).Append(" kJ\n");
-        text.Append("  Net active: ").Append(FormatSigned(netPotential)).Append(" J/s (").Append(FormatTrend(netPotential)).Append(")\n");
-        text.Append("  Potential (reference): day +").Append(diagnostics.photosynthesisPotential.ToString("F2"))
-            .Append(" J/s | night -").Append(diagnostics.respirationPotential.ToString("F2")).Append(" J/s\n");
-        text.Append("  Efficiency: light ").Append(FormatScore(Mathf.Clamp01(diagnostics.lightEfficiency)))
-            .Append(" | water ").Append(FormatScore(Mathf.Clamp01(diagnostics.hydrationEfficiency)))
-            .Append(" | temp ").Append(FormatScore(Mathf.Clamp01(diagnostics.temperatureMultiplier))).Append('\n');
-
-        if (dormancyTrigger > 0.0001f)
+        if (budget.ageing > budget.geneUpkeep && budget.ageing > 0.001f)
         {
-            bool dormancyRisk = !grass.IsDormant && grass.grassDensity >= grass.maturityThreshold && diagnostics.basePotential < dormancyTrigger;
-            text.Append("  Dormancy check: base ").Append(diagnostics.basePotential.ToString("F2"))
-                .Append(" vs trigger ").Append(dormancyTrigger.ToString("F2"))
-                .Append(" (").Append(dormancyRisk ? "<color=#FF6666>risk</color>" : "<color=#00DD66>safe</color>").Append(")\n");
+            warnings.Add("Old age: ageing now costs more than all its genes");
+        }
+        return warnings;
+    }
+
+    private static void AppendHabitat(StringBuilder text, GrassInstance grass, EnvironmentData envData, GrassInstance.PhotosynthesisFactors factors)
+    {
+        PlantGenome genome = grass.genome;
+        float lightNeed = genome.GetTraitValue(TraitId.LightRequirement);
+        float waterNeed = genome.GetTraitValue(TraitId.HydrationRequirement);
+        float idealTemperature = genome.GetTraitValue(TraitId.TemperatureTolerance);
+        bool isDay = envData.light > LIGHT_ACTIVITY_THRESHOLD;
+
+        if (isDay)
+        {
+            string lightNote = factors.lightEfficiency >= 0.99f ? "" : envData.light < lightNeed ? " too dark" : " too bright";
+            text.Append("  Light: ").Append(FormatPercent(envData.light * 100f)).Append(" of full sun, needs ").Append(FormatPercent(lightNeed * 100f))
+                .Append(" -> ").Append(FormatScore(factors.lightEfficiency)).Append(lightNote).Append('\n');
         }
         else
         {
-            text.Append("  Dormancy check: gene disabled\n");
+            text.Append("  Light: ").Append(Colored(MUTED_COLOR, "night - no photosynthesis")).Append('\n');
+        }
+
+        string waterNote = factors.hydrationEfficiency >= 0.99f ? "" : envData.hydration < waterNeed ? " too dry" : " too wet";
+        text.Append("  Water: ").Append(FormatPercent(envData.hydration)).Append(", needs ").Append(FormatPercent(waterNeed))
+            .Append(" -> ").Append(FormatScore(factors.hydrationEfficiency)).Append(waterNote).Append('\n');
+
+        text.Append("  Temp: ").Append(FormatTemperatureCelsius(envData.temperature)).Append(", ideal ").Append(FormatTemperatureCelsius(idealTemperature))
+            .Append(" -> x").Append(factors.temperatureMultiplier.ToString("F2")).Append(DescribeTemperatureEffect(envData.temperature - idealTemperature, factors.temperatureMultiplier)).Append('\n');
+
+        // Weakest factor, among those that matter right now
+        string weakest = "Water";
+        float weakestScore = factors.hydrationEfficiency;
+        if (Mathf.Clamp01(factors.temperatureMultiplier) < weakestScore)
+        {
+            weakest = "Temperature";
+            weakestScore = factors.temperatureMultiplier;
+        }
+        if (isDay && factors.lightEfficiency < weakestScore)
+        {
+            weakest = "Light";
+            weakestScore = factors.lightEfficiency;
+        }
+        text.Append("  Weakest: ").Append(weakest).Append(' ').Append(FormatScore(weakestScore)).Append('\n');
+        text.Append("  ").Append(Colored(MUTED_COLOR, "Photosynthesis = 2 x water x temp x light x size")).Append('\n');
+        text.Append("  ").Append(Colored(MUTED_COLOR, "Oxygen " + FormatPercent(envData.oxygen) + " (fuels night respiration) · Radiation "
+            + envData.radiation.ToString("F2") + " (drives mutation)")).Append('\n');
+    }
+
+    private static string DescribeTemperatureEffect(float difference, float multiplier)
+    {
+        if (difference >= 0f && multiplier > 1.001f)
+            return " warmth boost";
+        if (difference >= 0f && multiplier < 0.999f)
+            return " too hot";
+        if (difference < 0f && multiplier < 0.999f)
+            return " too cold";
+        return "";
+    }
+
+    private static void AppendEnergyBudget(StringBuilder text, GrassInstance grass, EnvironmentData envData, GrassInstance.EnergyBudget budget)
+    {
+        int genes = grass.genome.GetDominantDNALocusCount();
+        AppendFlow(text, '+', "Photosynthesis", budget.photosynthesis, budget.photosynthesisOn ? null : PhotosynthesisOffReason(grass, envData), null);
+        AppendFlow(text, '+', "Respiration", budget.respiration, budget.respirationOn ? null : RespirationOffReason(grass, envData), "burns tile oxygen");
+        AppendFlow(text, '-', "Gene upkeep", budget.geneUpkeep, null, genes + " genes");
+        AppendFlow(text, '-', "Ageing", budget.ageing, null, null);
+        AppendFlow(text, '-', "Growth", budget.growth, grass.IsDormant ? "dormant" : grass.grassDensity >= 1f ? "full size" : null, null);
+        if (grass.IsSeeding)
+        {
+            AppendFlow(text, '-', "Seed provisioning", budget.seedProvisioning, grass.IsDormant ? "dormant" : null, null);
+        }
+        text.Append("  = <b>Net ").Append(FormatSigned(budget.Net)).Append("/s</b>\n");
+
+        if (grass.nightEffect < 0.999f)
+        {
+            text.Append("  ").Append(Colored(MUTED_COLOR, "Night: upkeep, ageing and growth run at x" + grass.nightEffect.ToString("F2"))).Append('\n');
         }
     }
 
-    private static void AppendReproduction(StringBuilder text, PlantGenome genome, EnvironmentData envData)
+    private static void AppendFlow(StringBuilder text, char sign, string label, float value, string offReason, string detail)
     {
-        float maturityThreshold = Mathf.Max(0.0001f, genome.GetTraitValue(TraitId.MaturityThreshold));
-        float spreadThreshold = genome.GetTraitValue(TraitId.ReproductionEnergyThreshold);
-        float floweringThreshold = genome.GetTraitValue(TraitId.FloweringEnergyThreshold);
-        float seedEnergyThreshold = genome.GetTraitValue(TraitId.SeedEnergyThreshold);
-        float seedCount = genome.GetTraitValue(TraitId.SeedCount);
-        float pollenRange = genome.GetTraitValue(TraitId.PollenRange);
-        float seedRange = genome.GetTraitValue(TraitId.SeedDispersalRange);
-
-        bool spreadGeneEnabled = spreadThreshold > 0.0001f;
-        bool floweringGeneEnabled = floweringThreshold > 0.0001f && seedCount > 0.5f;
-
-        if (envData == null || envData.grass == null)
+        text.Append("  ").Append(sign).Append(' ').Append(label).Append(": ");
+        if (offReason != null)
         {
-            text.Append("  Spread gene: ").Append(spreadGeneEnabled ? "enabled" : "disabled").Append('\n');
-            text.Append("  Flowering gene: ").Append(floweringGeneEnabled ? "enabled" : "disabled").Append('\n');
-            text.Append("  Seeds/cycle: ").Append(seedCount.ToString("F0"))
-                .Append(" | Pollen range: ").Append(pollenRange.ToString("F0"))
-                .Append(" | Seed range: ").Append(seedRange.ToString("F0")).Append('\n');
+            text.Append(Colored(MUTED_COLOR, "off (" + offReason + ")")).Append('\n');
             return;
         }
-
-        GrassInstance grass = envData.grass;
-
-        bool maturityReady = grass.grassDensity >= maturityThreshold;
-        bool spreadReady = spreadGeneEnabled && grass.grassDensity >= 1f && grass.energyStored >= spreadThreshold;
-        bool floweringReady = floweringGeneEnabled && maturityReady && grass.energyStored >= floweringThreshold;
-        bool seedReady = floweringGeneEnabled && grass.IsSeeding && seedEnergyThreshold > 0.0001f && grass.seedingEnergy >= seedEnergyThreshold;
-
-        text.Append("  Maturity: ")
-            .Append(CreateBar(grass.grassDensity / maturityThreshold, 12))
-            .Append(' ')
-            .Append((grass.grassDensity * 100f).ToString("F1"))
-            .Append("% / ")
-            .Append((maturityThreshold * 100f).ToString("F1"))
-            .Append("%\n");
-
-        text.Append("  Spread: ").Append(FormatReadiness(spreadGeneEnabled, spreadReady))
-            .Append(" | E ").Append(grass.energyStored.ToString("F1")).Append(" / ").Append(FormatThreshold(spreadGeneEnabled, spreadThreshold))
-            .Append(" | Density ").Append((grass.grassDensity * 100f).ToString("F1")).Append("%\n");
-
-        text.Append("  Flowering: ").Append(FormatReadiness(floweringGeneEnabled, floweringReady))
-            .Append(" | E ").Append(grass.energyStored.ToString("F1")).Append(" / ").Append(FormatThreshold(floweringGeneEnabled, floweringThreshold))
-            .Append(" | Mature ").Append(maturityReady ? "yes" : "no").Append('\n');
-
-        if (floweringGeneEnabled && seedEnergyThreshold > 0.0001f)
+        text.Append(sign).Append(Mathf.Abs(value).ToString("F2"));
+        if (detail != null)
         {
-            text.Append("  Seed build: ")
-                .Append(CreateBar(grass.seedingEnergy / seedEnergyThreshold, 12))
-                .Append(' ')
-                .Append(grass.seedingEnergy.ToString("F1"))
-                .Append(" / ")
-                .Append(seedEnergyThreshold.ToString("F1"))
-                .Append(" kJ")
-                .Append(seedReady ? " (ready)" : grass.IsSeeding ? " (building)" : " (idle)")
-                .Append('\n');
+            text.Append(' ').Append(Colored(MUTED_COLOR, "(" + detail + ")"));
+        }
+        text.Append('\n');
+    }
+
+    private static string PhotosynthesisOffReason(GrassInstance grass, EnvironmentData envData)
+    {
+        if (grass.IsDormant) return "dormant";
+        if (grass.energyStored >= 100f) return "energy full";
+        if (envData.light <= LIGHT_ACTIVITY_THRESHOLD) return "dark";
+        return "inactive";
+    }
+
+    private static string RespirationOffReason(GrassInstance grass, EnvironmentData envData)
+    {
+        if (grass.IsDormant) return "dormant";
+        if (grass.energyStored >= 100f) return "energy full";
+        if (envData.light > LIGHT_ACTIVITY_THRESHOLD) return "daytime; night only";
+        return "only below " + grass.genome.GetTraitValue(TraitId.RespirationTrigger).ToString("F0") + " energy";
+    }
+
+    private static void AppendReproduction(StringBuilder text, GrassInstance grass, GrassManager grassManager, TimeController timeController)
+    {
+        PlantGenome genome = grass.genome;
+
+        // Cloning (GrassInstance.CheckAndHandleSpread + GrassManager clone limit)
+        float cloneEnergy = genome.GetTraitValue(TraitId.ReproductionEnergyThreshold);
+        int cloneLimit = grassManager != null ? grassManager.maxCloneAttemptsPerDay : 0;
+        string cloneStatus;
+        if (cloneEnergy < 0.0001f)
+            cloneStatus = Colored(MUTED_COLOR, "no cloning gene");
+        else if (grass.IsDormant)
+            cloneStatus = Colored(WARN_COLOR, "paused while dormant");
+        else if (grass.grassDensity < 1f)
+            cloneStatus = Colored(WARN_COLOR, "needs full size (now " + (grass.grassDensity * 100f).ToString("F0") + "%)");
+        else if (grass.energyStored < cloneEnergy)
+            cloneStatus = Colored(WARN_COLOR, "needs " + cloneEnergy.ToString("F0") + " energy (has " + grass.energyStored.ToString("F0") + ")");
+        else if (cloneLimit > 0 && grass.lastCloneDay == TimeController.simDaysSinceStart && grass.cloneAttemptsToday >= cloneLimit)
+            cloneStatus = Colored(WARN_COLOR, "daily limit reached");
+        else
+            cloneStatus = Colored(GOOD_COLOR, "ready");
+        text.Append("  Cloning: ").Append(cloneStatus).Append('\n');
+        if (cloneEnergy >= 0.0001f)
+        {
+            text.Append("    ").Append(Colored(MUTED_COLOR, "Copies itself to a random free neighbour, giving the clone "
+                + genome.GetTraitValue(TraitId.SpreadCost).ToString("F0") + " energy")).Append('\n');
+        }
+
+        // Flowering (GrassInstance.CheckFlowering + GrassManager.Flower monthly limit)
+        float flowerEnergy = genome.GetTraitValue(TraitId.FloweringEnergyThreshold);
+        float maturity = genome.GetTraitValue(TraitId.MaturityThreshold);
+        int flowerLimit = grassManager != null ? grassManager.flowerLimit : 1;
+        int daysPerMonth = grassManager != null && grassManager.seasonManager != null ? Mathf.Max(1, grassManager.seasonManager.DAYS_PER_MONTH) : 30;
+        long flowersUsed = grass.lastFlowerMonth == TimeController.simDaysSinceStart / daysPerMonth ? grass.flowersThisMonth : 0;
+        string flowerStatus;
+        if (flowerEnergy < 0.0001f)
+            flowerStatus = Colored(MUTED_COLOR, "no flowering gene");
+        else if (grass.IsFlowering)
+            flowerStatus = Colored(GOOD_COLOR, "flowering (day " + grass.floweringDays + ")");
+        else if (grass.IsSeeding)
+            flowerStatus = Colored(GOOD_COLOR, "done; seeds developing");
+        else if (grass.IsDormant)
+            flowerStatus = Colored(WARN_COLOR, "paused while dormant");
+        else if (grass.grassDensity < maturity)
+            flowerStatus = Colored(WARN_COLOR, "needs size " + (maturity * 100f).ToString("F0") + "% (now " + (grass.grassDensity * 100f).ToString("F0") + "%)");
+        else if (grass.energyStored < flowerEnergy)
+            flowerStatus = Colored(WARN_COLOR, "needs " + flowerEnergy.ToString("F0") + " energy (has " + grass.energyStored.ToString("F0") + ")");
+        else if (flowersUsed >= flowerLimit)
+            flowerStatus = Colored(WARN_COLOR, "monthly limit reached (" + flowersUsed + "/" + flowerLimit + ")");
+        else
+            flowerStatus = Colored(GOOD_COLOR, "ready");
+        text.Append("  Flowering: ").Append(flowerStatus).Append('\n');
+        if (grass.IsFlowering)
+        {
+            float selfRoll = Mathf.Clamp01((grass.floweringDays + 1) * 0.2f) * 100f;
+            text.Append("    ").Append(Colored(MUTED_COLOR, "Pollen reaches " + genome.GetTraitValue(TraitId.PollenRange).ToString("F0")
+                + " tiles daily. Tomorrow's self-pollination roll: " + selfRoll.ToString("F0") + "% (half set seed, half end flowering)")).Append('\n');
+        }
+
+        // Seeds (GrassManager.DisperseSeed, SeedManager germination)
+        if (flowerEnergy < 0.0001f)
+            return;
+
+        float seedTarget = genome.GetTraitValue(TraitId.SeedEnergyThreshold);
+        int seedCount = Mathf.Max(1, Mathf.RoundToInt(genome.GetTraitValue(TraitId.SeedCount)));
+        int seedRange = Mathf.Max(1, (int)genome.GetTraitValue(TraitId.SeedDispersalRange));
+        float energyPerSeed = seedTarget / seedCount;
+
+        if (grass.IsSeeding && seedTarget > 0.0001f)
+        {
+            text.Append("  Seeds: ").Append(CreateBar(grass.seedingEnergy / seedTarget, 12)).Append(' ')
+                .Append(grass.seedingEnergy.ToString("F0")).Append(" / ").Append(seedTarget.ToString("F0")).Append(" energy stored\n");
         }
         else
         {
-            text.Append("  Seed build: not available\n");
+            text.Append("  Seeds: ").Append(Colored(MUTED_COLOR, "none developing")).Append('\n');
         }
+        text.Append("    ").Append(Colored(MUTED_COLOR, "Batch of " + seedCount + " seeds, " + energyPerSeed.ToString("F1")
+            + " energy each, scattered up to " + seedRange + " tiles")).Append('\n');
 
-        text.Append("  Output: ").Append(seedCount.ToString("F0"))
-            .Append(" seeds/cycle | Pollen ").Append(pollenRange.ToString("F0"))
-            .Append(" | Seed range ").Append(seedRange.ToString("F0")).Append('\n');
-        text.Append("  Next milestone: ").Append(GetNextMilestone(grass, spreadGeneEnabled, floweringGeneEnabled, maturityThreshold, spreadThreshold, floweringThreshold, seedEnergyThreshold)).Append('\n');
+        float germinationEnergy = genome.GetTraitValue(TraitId.GerminationEnergy);
+        int stages = (byte)genome.GetTraitValue(TraitId.SproutStage);
+        int stepsPerDay = timeController != null ? Mathf.Max(1, timeController.germinationStepsPerDay) : 24;
+        float daysToSprout = stages / (float)stepsPerDay;
+        float energyNeeded = germinationEnergy * stages + Mathf.Floor(daysToSprout); // stages plus ~1 energy of decay per night
+        float sproutChance = Mathf.Clamp01(germinationEnergy * stages * 0.05f) * 100f;
+        string viability = energyPerSeed >= energyNeeded ? Colored(GOOD_COLOR, "viable") : Colored(BAD_COLOR, "too small to sprout");
+        text.Append("    Each seed needs ~").Append(energyNeeded.ToString("F1")).Append(" energy over ~").Append(daysToSprout.ToString("F1"))
+            .Append(" days; sprout chance ").Append(sproutChance.ToString("F0")).Append("%: ").Append(viability).Append('\n');
+
+        float cue = genome.GetTraitValue(TraitId.GerminationCue);
+        float cold = genome.GetTraitValue(TraitId.SeedColdPreservation);
+        text.Append("    ").Append(Colored(MUTED_COLOR,
+            (cue > 0f ? "Seeds wait for habitat fit >= " + (cue * 100f).ToString("F0") + "%" : "Seeds sprout whatever the conditions")
+            + "; " + (cold > 0f ? (cold * 100f).ToString("F0") + "% less decay in the cold" : "no cold protection"))).Append('\n');
     }
 
-    private static EnergyDiagnostics CalculateEnergyDiagnostics(PlantGenome genome, EnvironmentData envData)
+    private static string FormatSimDuration(float simSeconds)
     {
-        EnergyDiagnostics diagnostics = new EnergyDiagnostics();
-        if (genome == null || envData == null || envData.grass == null)
-            return diagnostics;
+        float hourLength = Mathf.Max(0.0001f, TimeController.fullDayLength / 24f);
+        float hours = simSeconds / hourLength;
+        if (float.IsNaN(hours) || float.IsInfinity(hours) || hours > 24f * 999f)
+            return "a very long time";
+        if (hours < 1f)
+            return "< 1 h";
+        if (hours < 24f)
+            return "~" + hours.ToString("F0") + " h";
+        return "~" + (hours / 24f).ToString("F1") + " days";
+    }
 
-        diagnostics.lightRequirement = Mathf.Max(0.0001f, genome.GetTraitValue(TraitId.LightRequirement));
-        diagnostics.hydrationRequirement = Mathf.Max(0.0001f, genome.GetTraitValue(TraitId.HydrationRequirement));
-        diagnostics.temperatureTolerance = genome.GetTraitValue(TraitId.TemperatureTolerance);
-        diagnostics.respirationRate = genome.GetTraitValue(TraitId.RespirationRate);
-        diagnostics.respirationTrigger = genome.GetTraitValue(TraitId.RespirationTrigger);
-
-        diagnostics.lightEfficiency = Mathf.Clamp01(envData.light / diagnostics.lightRequirement);
-        if (envData.light > diagnostics.lightRequirement + 0.1f)
-        {
-            diagnostics.lightEfficiency -= envData.light - diagnostics.lightRequirement - 0.1f;
-        }
-
-        diagnostics.hydrationEfficiency = Mathf.Clamp01(envData.hydration / diagnostics.hydrationRequirement);
-        if (envData.hydration > diagnostics.hydrationRequirement)
-        {
-            diagnostics.hydrationEfficiency -= (envData.hydration - diagnostics.hydrationRequirement) / 80f;
-        }
-
-        float tempDifference = envData.temperature - diagnostics.temperatureTolerance;
-        diagnostics.temperatureMultiplier = tempDifference >= 0f
-            ? Mathf.Clamp01(1.5f - (tempDifference / 10f))
-            : Mathf.Clamp01(1f + (tempDifference / 10f));
-
-        diagnostics.basePotential = 2f * diagnostics.hydrationEfficiency * diagnostics.temperatureMultiplier;
-        diagnostics.isDaylight = envData.light > LIGHT_ACTIVITY_THRESHOLD;
-        diagnostics.photosynthesisPotential = diagnostics.basePotential * diagnostics.lightEfficiency * envData.grass.grassDensity;
-        diagnostics.respirationPotential = diagnostics.respirationRate * envData.grass.grassDensity * envData.oxygen * 0.05f * envData.grass.dormancyEffect;
-
-        diagnostics.photosynthesisActive = envData.grass.usedPhotosynthesisLastTick;
-        diagnostics.respirationActive = envData.grass.usedRespirationLastTick;
-
-        diagnostics.activePhotosynthesis = diagnostics.photosynthesisActive ? diagnostics.photosynthesisPotential : 0f;
-        diagnostics.activeRespiration = diagnostics.respirationActive ? diagnostics.respirationPotential : 0f;
-        diagnostics.netPotential = diagnostics.activePhotosynthesis - diagnostics.activeRespiration;
-        return diagnostics;
+    private static string Colored(string color, string content)
+    {
+        return "<color=" + color + ">" + content + "</color>";
     }
 
     private static string GetDensityStage(float density)
@@ -838,85 +940,17 @@ public class DetailedInformationPanelController : MonoBehaviour
         return "Full";
     }
 
-    private static string GetStateLabel(GrassInstance grass)
-    {
-        if (grass.IsDormant)
-            return "Dormant";
-        if (grass.IsSeeding)
-            return "Seeding";
-        if (grass.IsFlowering)
-            return "Flowering";
-        return "Active";
-    }
-
-    private static string DescribeRelative(float current, float target, string lowWord, string highWord)
-    {
-        float tolerance = Mathf.Max(0.05f, Mathf.Abs(target) * 0.1f);
-        float delta = current - target;
-        if (Mathf.Abs(delta) <= tolerance)
-            return "balanced";
-        return delta < 0f ? lowWord : highWord;
-    }
-
-    private static string DescribeTemperature(float current, float optimal)
-    {
-        float delta = current - optimal;
-        float absDelta = Mathf.Abs(delta);
-        if (absDelta <= 2f)
-            return "balanced";
-        if (delta < 0f)
-            return absDelta > 8f ? "cold stress" : "cool";
-        return absDelta > 8f ? "heat stress" : "warm";
-    }
-
     private static string FormatScore(float score)
     {
         float clamped = Mathf.Clamp01(score);
         float percent = clamped * 100f;
-        string color = percent >= 75f ? "#00DD66" : percent >= 45f ? "#FFCC33" : "#FF6666";
-        return "<color=" + color + ">" + percent.ToString("F0") + "%</color>";
+        string color = percent >= 75f ? GOOD_COLOR : percent >= POOR_FIT * 100f ? WARN_COLOR : BAD_COLOR;
+        return Colored(color, percent.ToString("F0") + "%");
     }
 
     private static string FormatSigned(float value)
     {
         return (value >= 0f ? "+" : string.Empty) + value.ToString("F2");
-    }
-
-    private static string FormatTrend(float netPotential)
-    {
-        if (netPotential > 0.02f)
-            return "<color=#00DD66>charging</color>";
-        if (netPotential < -0.02f)
-            return "<color=#FF6666>draining</color>";
-        return "<color=#FFCC33>stable</color>";
-    }
-
-    private static string GetEnergyMode(GrassInstance grass, EnergyDiagnostics diagnostics)
-    {
-        if (grass.IsDormant)
-            return "Dormant recovery";
-        if (grass.energyStored >= 100f)
-            return "Energy cap reached";
-        if (diagnostics.photosynthesisActive)
-            return "Photosynthesis active";
-        if (diagnostics.respirationActive)
-            return "Respiration fallback (night)";
-
-        return diagnostics.isDaylight ? "Day idle" : "Night idle";
-    }
-
-    private static string FormatReadiness(bool enabled, bool ready)
-    {
-        if (!enabled)
-            return "<color=#999999>disabled</color>";
-        return ready ? "<color=#00DD66>ready</color>" : "<color=#FFAA33>not ready</color>";
-    }
-
-    private static string FormatThreshold(bool enabled, float threshold)
-    {
-        if (!enabled)
-            return "n/a";
-        return threshold.ToString("F1") + " kJ";
     }
 
     private static string FormatTemperatureCelsius(float valueCelsius)
@@ -955,30 +989,6 @@ public class DetailedInformationPanelController : MonoBehaviour
         return ToDisplayRadiationRate(simRadiation).ToString("F3") + " uSv/h";
     }
 
-    private static string GetNextMilestone(
-        GrassInstance grass,
-        bool spreadGeneEnabled,
-        bool floweringGeneEnabled,
-        float maturityThreshold,
-        float spreadThreshold,
-        float floweringThreshold,
-        float seedEnergyThreshold)
-    {
-        if (!spreadGeneEnabled && !floweringGeneEnabled)
-            return "No reproduction genes enabled.";
-        if (grass.grassDensity < maturityThreshold)
-            return "Grow density to maturity threshold.";
-        if (floweringGeneEnabled && grass.energyStored < floweringThreshold)
-            return "Store energy for flowering.";
-        if (spreadGeneEnabled && grass.grassDensity < 1f)
-            return "Reach full density for spreading.";
-        if (spreadGeneEnabled && grass.energyStored < spreadThreshold)
-            return "Store energy for spreading.";
-        if (grass.IsSeeding && seedEnergyThreshold > 0.0001f && grass.seedingEnergy < seedEnergyThreshold)
-            return "Accumulate seed energy for dispersal.";
-        return "Ready for next reproductive event.";
-    }
-
     private static string CreateBar(float value, int width = 15)
     {
         value = Mathf.Clamp01(value);
@@ -1006,26 +1016,6 @@ public class DetailedInformationPanelController : MonoBehaviour
         return "[<color=" + color + ">" + filledPart + "</color>" + new string(' ', width - filled) + "]";
     }
 
-    private struct EnergyDiagnostics
-    {
-        public float lightRequirement;
-        public float hydrationRequirement;
-        public float temperatureTolerance;
-        public float respirationRate;
-        public float respirationTrigger;
-        public float lightEfficiency;
-        public float hydrationEfficiency;
-        public float temperatureMultiplier;
-        public float basePotential;
-        public float photosynthesisPotential;
-        public float respirationPotential;
-        public float activePhotosynthesis;
-        public float activeRespiration;
-        public float netPotential;
-        public bool isDaylight;
-        public bool photosynthesisActive;
-        public bool respirationActive;
-    }
     private void SetButtonsActive(bool active)
     {
         if (tabButtons != null)

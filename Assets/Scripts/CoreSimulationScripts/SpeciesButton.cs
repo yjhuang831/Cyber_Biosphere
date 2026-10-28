@@ -8,7 +8,7 @@ using System.IO;
 /// </summary>
 public class SpeciesButton : MonoBehaviour
 {
-    internal string speciesId;
+    internal string speciesId; // Library species GUID
 
     public void OnSpeciesSelected()
     {
@@ -29,8 +29,7 @@ public class SpeciesButton : MonoBehaviour
         {
             if (GenusManager.Instance != null)
             {
-                GenusManager.Instance.DeleteSavedSpecies(speciesId);
-                manager.RefreshAndShowSpecies();
+                GenusManager.Instance.DeleteSavedSpecies(speciesId); // LibraryChanged refreshes the open list
             }
         }
     }

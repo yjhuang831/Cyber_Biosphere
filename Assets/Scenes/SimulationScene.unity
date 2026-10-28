@@ -8845,7 +8845,6 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 164dbd9eed957444189794f181d07c8d, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  preserveHistoricalSpecies: 1
 --- !u!114 &876398467
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -8882,6 +8881,8 @@ MonoBehaviour:
   - {fileID: 11400000, guid: 63538a7c00b482943b9e7b8811d3070f, type: 2}
   - {fileID: 11400000, guid: deac35b722bf9cb4f9eb08ba0629e5b6, type: 2}
   - {fileID: 11400000, guid: 381b4ec7703efc442a289d6d89aa9ba6, type: 2}
+  - {fileID: 11400000, guid: 343b4ceb335b45cfb2969ab991a4cffd, type: 2}
+  - {fileID: 11400000, guid: fae69e81447c4cb082ca7448cda35bc8, type: 2}
 --- !u!114 &876398468
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -8897,6 +8898,8 @@ MonoBehaviour:
   maxSeedsPerTile: 0
   mapManager: {fileID: 1471658979}
   grassManager: {fileID: 876398464}
+  coldPreservationStartTemperature: 5
+  coldPreservationFullRange: 20
 --- !u!114 &876398469
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -10159,9 +10162,26 @@ MonoBehaviour:
   landOxygen: 50
   dayNightCycleSpeed: 1
   baseLightLevel: 0
+  landSoilOrganicCarbon: 60
+  waterSoilOrganicCarbon: 12
+  landNitrogen: 35
+  waterNitrogen: 12
+  landPhosphorus: 24
+  waterPhosphorus: 10
+  landPotassium: 40
+  waterPotassium: 16
+  atmosphericCarbon: 0
+  carbonDecompositionRate: 0.00001
+  aquaticCarbonUptakeRate: 0.00001
+  carbonSedimentationRate: 0.000001
+  nitrogenDepositionRate: 0.00001
+  phosphorusWeatheringRate: 0.000002
+  potassiumWeatheringRate: 0.000005
+  nutrientLeachingRate: 0.0001
   mapManager: {fileID: 1471658979}
   grassManager: {fileID: 876398464}
   environmentVisualizer: {fileID: 1064579891}
+  oxygenDiffusionCoefficient: 0.01
 --- !u!114 &1064579891
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -17888,6 +17908,7 @@ MonoBehaviour:
   sliderMaxTimeScale: 250
   maxTicksPerFrame: 120
   minRegulatedTimeScale: 1
+  germinationStepsPerDay: 24
   fpsText: {fileID: 1801171891}
   timeText: {fileID: 2002742904}
   simTimeText: {fileID: 1068352089}

@@ -18,6 +18,8 @@ public class SavedSpeciesManager : MonoBehaviour
     public TMP_Text selectedSpeciesText;
     public Button clearSelectionButton;
 
+    private GenusManager subscribedGenusManager;
+
     void Start()
     {
         selectedSpeciesText.text = "";
@@ -26,6 +28,47 @@ public class SavedSpeciesManager : MonoBehaviour
             clearSelectionButton.gameObject.SetActive(false);
         }
         HideSpecies();
+        subscribedGenusManager = GenusManager.Instance;
+        if (subscribedGenusManager != null)
+        {
+            subscribedGenusManager.LibraryChanged += OnLibraryChanged;
+        }
+    }
+
+    void OnDestroy()
+    {
+        // Use the stored reference: during scene teardown GenusManager.Instance may already be gone
+        if (subscribedGenusManager != null)
+        {
+            subscribedGenusManager.LibraryChanged -= OnLibraryChanged;
+        }
+    }
+
+    // Keeps an open list and the selection label in sync with saves, renames, and deletions
+    private void OnLibraryChanged()
+    {
+        if (speciesPanel != null && speciesPanel.activeSelf)
+        {
+            ShowSpecies(true);
+        }
+        RefreshSelectionText();
+    }
+
+    private void RefreshSelectionText()
+    {
+        GenusManager.SpeciesEntry entry = null;
+        GenusManager genusManager = GenusManager.Instance;
+        bool hasSelection = genusManager != null
+            && genusManager.TryGetSpeciesEntry(genusManager.selectedSpeciesId, out entry);
+
+        if (selectedSpeciesText != null)
+        {
+            selectedSpeciesText.text = hasSelection ? "Selected: " + entry.DisplayName : "";
+        }
+        if (clearSelectionButton != null)
+        {
+            clearSelectionButton.gameObject.SetActive(hasSelection);
+        }
     }
 
     /// <summary>
@@ -45,14 +88,16 @@ public class SavedSpeciesManager : MonoBehaviour
             Destroy(speciesContentParent.transform.GetChild(i).gameObject);
         }
 
-        // Create buttons for each available species
+        // Create buttons for each available species, sorted by name; buttons carry the GUID
         if (GenusManager.Instance != null)
         {
-            foreach (var speciesId in GenusManager.Instance.Local_SpeciesReferences)
+            List<GenusManager.SpeciesEntry> entries = new List<GenusManager.SpeciesEntry>(GenusManager.Instance.Local_Species.Values);
+            entries.Sort((a, b) => string.Compare(a.DisplayName, b.DisplayName, System.StringComparison.OrdinalIgnoreCase));
+            foreach (GenusManager.SpeciesEntry entry in entries)
             {
                 GameObject buttonObj = Instantiate(speciesButtonPrefab, speciesContentParent.transform);
-                buttonObj.GetComponentInChildren<TMP_Text>().text = speciesId;
-                buttonObj.GetComponent<SpeciesButton>().speciesId = speciesId;
+                buttonObj.GetComponentInChildren<TMP_Text>().text = entry.DisplayName;
+                buttonObj.GetComponent<SpeciesButton>().speciesId = entry.guid;
             }
         }
 
@@ -93,11 +138,7 @@ public class SavedSpeciesManager : MonoBehaviour
             GenusManager.Instance.selectedSpeciesId = null;
         }
 
-        if (selectedSpeciesText != null)
-        {
-            selectedSpeciesText.text = "";
-        }
-        clearSelectionButton.gameObject.SetActive(false);
+        RefreshSelectionText();
     }
 
     /// <summary>
@@ -115,11 +156,6 @@ public class SavedSpeciesManager : MonoBehaviour
             GenusManager.Instance.SelectSpecies(speciesId);
         }
 
-        // Update UI display
-        if (selectedSpeciesText != null)
-        {
-            selectedSpeciesText.text = "Selected: " + speciesId;
-        }
-        clearSelectionButton.gameObject.SetActive(true);
+        RefreshSelectionText();
     }
 }

@@ -11,6 +11,20 @@ public class EnvironmentData
     public float oxygen;
     public bool isWater;
 
+    // Map-level biogeochemical pools. These are not consumed by grass yet.
+    public float soilOrganicCarbon;
+    public float dissolvedCarbon;
+    public float availableNitrogen;
+    public float availablePhosphorus;
+    public float availablePotassium;
+
+    // Scratch values used to apply diffusion from a stable oxygen snapshot.
+    [System.NonSerialized] public float oxygenBeforeDiffusion;
+    [System.NonSerialized] public float oxygenDiffusionDelta;
+    [System.NonSerialized] public float nitrogenTransportDelta;
+    [System.NonSerialized] public float phosphorusTransportDelta;
+    [System.NonSerialized] public float potassiumTransportDelta;
+
     public GrassInstance grass; // Grass on this tile (includes genetics, energy, and instance state)
 
     // Cache for tilemap rendering optimization - avoids redundant SetTile/SetColor calls

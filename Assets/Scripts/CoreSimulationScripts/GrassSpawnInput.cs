@@ -29,9 +29,12 @@ public class GrassSpawnInput : MonoBehaviour
                         // Try to load the selected species genome
                         if (GenusManager.Instance.TryGetSavedSpeciesGenome(GenusManager.Instance.selectedSpeciesId, out PlantGenomeState genomeState))
                         {
-                            // Convert PlantGenomeState to PlantGenome
+                            // Convert PlantGenomeState to PlantGenome (carries the species GUID into the simulation)
                             genome = grassManager.BuildGenomeFromState(genomeState);
-                            initialEnergy = genome.GetTraitValue(TraitId.SpreadCost);
+                            if (genome != null)
+                            {
+                                initialEnergy = genome.GetTraitValue(TraitId.SpreadCost);
+                            }
                         }
                     }
 

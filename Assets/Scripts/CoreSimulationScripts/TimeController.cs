@@ -27,19 +27,35 @@ public class TimeController : MonoBehaviour
     private float grassUpdateInterval = 0.4f;
     private float oxygenDiffusionInterval = 10f;
     private float pruneInterval = 30f; // Prune species every 30 real seconds
-    private float visualUpdateInterval = 0.02f; // Update visuals every 0.02 real seconds
+    private float visualUpdateInterval = 0.033f; // Refresh overlays at roughly 30 Hz without tying them to render FPS.
     private float dayNightInterval = 0.2f; // Update day-night cycle every 0.2 sim seconds
-    private float seasonUpdateInterval = 30f; // Check for season change every 30 sim seconds
+
+    [Header("Seeds")]
+    [Tooltip("Germination steps per sim day, spaced evenly across the day. Independent of day length.")]
+    [Min(1)] public int germinationStepsPerDay = 24;
+    private float daySimTime = 0f;              // Sim seconds since the current day began (dawn)
+    private int germinationStepsDoneToday = 0;
+
+    [Header("Research Logging")]
+    [Tooltip("Write daily research data to persistentDataPath/ResearchLogs (one folder per session).")]
+    public bool enableResearchLogging = true;
+    [Tooltip("Sim days between trait distribution snapshots. 0 = never.")]
+    [Min(0)] public int traitSnapshotIntervalDays = 5;
+    private ResearchLogger researchLogger;
 
     [Header("Per-Subsystem Timers (real-time only)")]
     private float pruneTimer = 0f;
     private float visualTimer = 0f;
     private float smoothRunTimer = 0f;
-    private float totalSimulatedTime = 0f; // Track total simulated time for display
+    /// <summary>
+    /// Sim seconds since day 0's dawn. Derived from the day counter so it stays exact in long runs
+    /// (a float accumulator stops advancing by 0.04 s ticks after ~1M sim seconds, about 4 sim years).
+    /// </summary>
+    internal double TotalSimulatedSeconds => simDaysSinceStart * (double)dayLength + daySimTime;
     private float autoSaveTimer = 0f;
     private float dayTimeAccumulator = 0f;
     private float switchAccumulator = 0f;
-    private int dayLength = 720; // Length of a full day-night cycle in
+    private const int dayLength = 720; // Sim seconds in one day/night cycle = 24 sim hours (30 sim seconds per hour)
     private bool dayNightSwitch = true;
     internal static float fullDayLength = 0f;
     private bool isDay = true;
@@ -55,7 +71,6 @@ public class TimeController : MonoBehaviour
     private int grassPeriodTicks = 1;
     private int oxygenPeriodTicks = 1;
     private int dayNightPeriodTicks = 1;
-    private int seasonPeriodTicks = 1;
     private bool oxygenPending = false;
     private long tickWrap = long.MaxValue;
     private const long MAX_DAY_COUNTER = 1_000_000_000L;
@@ -93,9 +108,19 @@ public class TimeController : MonoBehaviour
 
     public GameObject infoPanelRoot;
 
+    void Awake()
+    {
+        // Statics survive scene reloads; reset them so a new simulation doesn't inherit the previous session's clock.
+        // A queued snapshot overrides these in Start(). fullDayLength is left alone because SeasonManager.Awake may already have set it.
+        simDaysSinceStart = 0;
+        accumulatedAge = 0;
+        isNight = false;
+    }
+
     void Start()
     {
         Time.timeScale = 1f;
+        UpdateLightDistribution();
         speedSlider.maxValue = Mathf.Max(speedSlider.maxValue, sliderMaxTimeScale);
         speedSlider.onValueChanged.AddListener(OnSliderValueChanged);
         speedSlider.SetValueWithoutNotify(1f);
@@ -123,11 +148,26 @@ public class TimeController : MonoBehaviour
         SetAutoSaveStatus(false);
 
         // If the main menu queued a save file, apply it as soon as this scene is initialized.
-        SimulationLoadSystem.TryApplyPendingSnapshot(
+        // The load rebuilds the map itself; otherwise make sure the default map exists before the first Update.
+        bool loaded = SimulationLoadSystem.TryApplyPendingSnapshot(
             this,
             environmentManager,
             grassManager,
             seedManager);
+        if (!loaded && environmentManager.mapManager != null)
+        {
+            environmentManager.mapManager.EnsureInitialized();
+        }
+
+        if (enableResearchLogging)
+        {
+            string source = loaded ? "load:" + SimulationLoadSystem.SimulationName : "new";
+            researchLogger = ResearchLogger.StartRun(source, this, environmentManager, grassManager, seedManager, traitSnapshotIntervalDays);
+        }
+        else
+        {
+            ResearchCounters.TakeAndReset();
+        }
 
         infoPanelRoot.SetActive(true);
     }
@@ -197,16 +237,14 @@ public class TimeController : MonoBehaviour
         while (accumulator >= simTick && ticks < tickBudget)
         {
             AdvanceSimTick();
+            daySimTime += simTick;
 
             if (simTickCount % dayNightPeriodTicks == 0)
             {
                 DayNightCycle(dayNightInterval);
             }
 
-            if (simTickCount % seasonPeriodTicks == 0)
-            {
-                seedManager.HourlySeedUpdate();
-            }
+            RunDueGerminationSteps();
 
             if (simTickCount % oxygenPeriodTicks == 0)
             {
@@ -215,7 +253,8 @@ public class TimeController : MonoBehaviour
 
             if (simTickCount % environmentPeriodTicks == 0)
             {
-                environmentManager.UpdateTileEnvironment(null, false, oxygenPending, environmentUpdateInterval);
+                // Hydration/radiation only change with terrain or settings edits, which trigger their own recalculation.
+                environmentManager.UpdateTileEnvironment(null, false, oxygenPending, environmentUpdateInterval, skipHydrationUpdate: true);
                 oxygenPending = false;
             }
 
@@ -227,7 +266,6 @@ public class TimeController : MonoBehaviour
             accumulator -= simTick;
             ticks++;
         }
-        totalSimulatedTime += ticks * simTick; // Track processed simulation time for display
 
         if (ticks >= tickBudget && accumulator >= simTick)
         {
@@ -323,7 +361,6 @@ public class TimeController : MonoBehaviour
             environmentManager,
             grassManager,
             seedManager,
-            totalSimulatedTime,
             saveName);
         if (!saveSucceeded)
         {
@@ -354,8 +391,7 @@ public class TimeController : MonoBehaviour
             this,
             environmentManager,
             grassManager,
-            seedManager,
-            totalSimulatedTime);
+            seedManager);
 
         if (saveSucceeded)
         {
@@ -387,20 +423,19 @@ public class TimeController : MonoBehaviour
         autoSaveStatusText.gameObject.SetActive(visible);
     }
 
-    internal void ApplyLoadedTimeState(
-        long loadedSimDaysSinceStart,
-        long loadedAccumulatedAge,
-        bool loadedIsNight,
-        float loadedTotalSimulatedTimeSeconds,
-        float loadedNoonTimeHours,
-        float loadedBaseLightLevel)
+    /// <summary>
+    /// Restores clock state from a snapshot. Saves with an exact day phase (schema 8+) resume mid-day precisely;
+    /// older saves reconstruct the phase from the light level.
+    /// </summary>
+    internal void ApplyLoadedTimeState(TimeState state, float loadedBaseLightLevel, bool hasExactDayPhase)
     {
-        simDaysSinceStart = System.Math.Max(0L, loadedSimDaysSinceStart);
-        accumulatedAge = System.Math.Max(0L, loadedAccumulatedAge);
-        isNight = loadedIsNight;
-        isDay = !loadedIsNight;
+        simDaysSinceStart = System.Math.Max(0L, state.simDaysSinceStart);
+        accumulatedAge = System.Math.Max(0L, state.accumulatedAge);
+        isNight = state.isNight;
+        isDay = !state.isNight;
+        float loadedNoonTimeHours = state.noonTimeHours;
 
-        totalSimulatedTime = Mathf.Max(0f, loadedTotalSimulatedTimeSeconds);
+        // Total simulated time is derived from the day counter and daySimTime, so the saved total isn't read back
 
         float clampedScale = 1f;
         simTimeScale = clampedScale;
@@ -423,7 +458,23 @@ public class TimeController : MonoBehaviour
         }
 
         UpdateLightDistribution();
-        RecomputeDayNightSwitchAccumulator(loadedBaseLightLevel);
+        if (hasExactDayPhase)
+        {
+            isDay = state.isDay;
+            dayNightSwitch = state.dayNightSwitch;
+            dayTimeAccumulator = Mathf.Max(0f, state.dayTimeAccumulator);
+            switchAccumulator = Mathf.Max(0f, state.switchAccumulator);
+            daySimTime = Mathf.Max(0f, state.daySimTime);
+            germinationStepsDoneToday = Mathf.Max(0, state.germinationStepsDoneToday);
+        }
+        else
+        {
+            RecomputeDayNightSwitchAccumulator(loadedBaseLightLevel);
+            // Legacy saves don't know how far into the day they were; skip germination for the rest of
+            // the loaded day rather than bunching a whole day's steps into the remainder.
+            daySimTime = 0f;
+            germinationStepsDoneToday = Mathf.Max(1, germinationStepsPerDay);
+        }
 
         if (speedSlider != null)
         {
@@ -437,6 +488,24 @@ public class TimeController : MonoBehaviour
         {
             simDate.text = ConvertDaysToDate(simDaysSinceStart, 12, 30);
         }
+    }
+
+    /// <summary>
+    /// Fills the clock fields of a snapshot TimeState (the save system owns the rest).
+    /// </summary>
+    internal void WriteTimeState(TimeState state)
+    {
+        state.simDaysSinceStart = simDaysSinceStart;
+        state.accumulatedAge = accumulatedAge;
+        state.isNight = isNight;
+        state.isDay = isDay;
+        state.totalSimulatedTimeSeconds = TotalSimulatedSeconds; // Informational (research tools); not read on load
+        state.noonTimeHours = noonTime;
+        state.dayNightSwitch = dayNightSwitch;
+        state.dayTimeAccumulator = dayTimeAccumulator;
+        state.switchAccumulator = switchAccumulator;
+        state.daySimTime = daySimTime;
+        state.germinationStepsDoneToday = germinationStepsDoneToday;
     }
 
     private void RecomputeDayNightSwitchAccumulator(float baseLightLevel)
@@ -482,7 +551,7 @@ public class TimeController : MonoBehaviour
         {
             timeText.text = $"Sim Time: X{simTimeScale:F1}"; // Example of showing sim time or day-night cycle
         }
-        SetSimTimeText(totalSimulatedTime, simTimeText);
+        SetSimTimeText(TotalSimulatedSeconds, simTimeText);
         plantCountText.text = "#Plants: " + grassManager.plantCount.ToString();
         seedCountText.text = "#Seeds: " + seedManager.seedCount.ToString();
     }
@@ -495,19 +564,22 @@ public class TimeController : MonoBehaviour
         return currentFps;
     }
 
-    private static void SetSimTimeText(float totalSeconds, Text simTimeText)
+    private static void SetSimTimeText(double totalSeconds, Text simTimeText)
     {
-        int seconds = Mathf.RoundToInt(totalSeconds);
+        long seconds = (long)System.Math.Round(totalSeconds); // long: int overflows after ~68 years of sim seconds
 
-        int hours = seconds / 3600;
-        int minutes = (seconds % 3600) / 60;
-        int secs = seconds % 60;
+        long hours = seconds / 3600;
+        long minutes = (seconds % 3600) / 60;
+        long secs = seconds % 60;
 
         simTimeText.text = $"{hours:00}:{minutes:00}:{secs:00}";
     }
 
     private void DayNightCycle(float interval)
     {
+        // Cheap; keeps the daylight/night split current if the ratio or season changes mid-day (e.g. from a slider)
+        UpdateLightDistribution();
+
         // Advance day-night
         if (dayNightSwitch)
         {
@@ -546,22 +618,35 @@ public class TimeController : MonoBehaviour
                 simDaysSinceStart = IncrementWithWrap(simDaysSinceStart, MAX_DAY_COUNTER);
                 // Season progression is now player-driven (see SeasonManager coroutine)
                 accumulatedAge = IncrementWithWrap(accumulatedAge, MAX_DAY_COUNTER); // Increment accumulated age at the end of each night
+                FinishGerminationDay();
                 seedManager.SeedDecay();
+                long completedDay = simDaysSinceStart > 0 ? simDaysSinceStart - 1 : MAX_DAY_COUNTER - 1;
+                if (researchLogger != null)
+                {
+                    researchLogger.OnDayCompleted(completedDay);
+                }
+                else
+                {
+                    ResearchCounters.TakeAndReset(); // Keep counters per-day even when not logging
+                }
                 simDate.text = ConvertDaysToDate(simDaysSinceStart, 12, 30);
             }
         }
     }
 
+    /// <summary>
+    /// A day is always one full day/night cycle of 24 sim hours (dayLength sim seconds):
+    /// dawn (1 h) + daylight hold + dusk (1 h) + night. The season sets the daylight hold (noonTime) and
+    /// dayNightCycleSpeed scales it, so both only shift the daylight/night split, never the day's length.
+    /// </summary>
     internal void UpdateLightDistribution()
     {
-        fullDayLength = dayLength * environmentManager.dayNightCycleSpeed;
-        float clampedNoonHours = Mathf.Clamp(noonTime, 0f, 24f);
-        noonTimeSeconds = clampedNoonHours * fullDayLength / 24f;
-        nightTime = fullDayLength - noonTimeSeconds - fullDayLength / 12f;
-        if (nightTime < 0f)
-        {
-            nightTime = 0f;
-        }
+        fullDayLength = dayLength;
+        float hourLength = fullDayLength / 24f;
+        float transitionHours = 2f; // Dawn and dusk ramps, one hour each (see DayNightCycle's cosine)
+        float daylightHoldHours = Mathf.Clamp(noonTime * Mathf.Max(0f, environmentManager.dayNightCycleSpeed), 0f, 24f - transitionHours);
+        noonTimeSeconds = daylightHoldHours * hourLength;
+        nightTime = Mathf.Max(0f, fullDayLength - noonTimeSeconds - transitionHours * hourLength);
     }
 
     private void RecomputePeriodTicks()
@@ -570,8 +655,37 @@ public class TimeController : MonoBehaviour
         grassPeriodTicks = Mathf.Max(1, Mathf.RoundToInt(grassUpdateInterval / simTick));
         oxygenPeriodTicks = Mathf.Max(1, Mathf.RoundToInt(oxygenDiffusionInterval / simTick));
         dayNightPeriodTicks = Mathf.Max(1, Mathf.RoundToInt(dayNightInterval / simTick));
-        seasonPeriodTicks = Mathf.Max(1, Mathf.RoundToInt(seasonUpdateInterval / simTick));
-        tickWrap = ComputeTickWrap(environmentPeriodTicks, grassPeriodTicks, oxygenPeriodTicks, dayNightPeriodTicks, seasonPeriodTicks);
+        tickWrap = ComputeTickWrap(environmentPeriodTicks, grassPeriodTicks, oxygenPeriodTicks, dayNightPeriodTicks);
+    }
+
+    /// <summary>
+    /// Runs germination steps due so far today: step k of N happens once k/N of the day has elapsed.
+    /// </summary>
+    private void RunDueGerminationSteps()
+    {
+        int stepsPerDay = Mathf.Max(1, germinationStepsPerDay);
+        float cycleLength = Mathf.Max(fullDayLength, simTick);
+        int due = Mathf.Min(stepsPerDay, Mathf.FloorToInt(daySimTime / cycleLength * stepsPerDay));
+        while (germinationStepsDoneToday < due)
+        {
+            seedManager.GerminationStep();
+            germinationStepsDoneToday++;
+        }
+    }
+
+    /// <summary>
+    /// Called at dawn: tops up any step lost to rounding so each day gets exactly germinationStepsPerDay, then starts a new day.
+    /// </summary>
+    private void FinishGerminationDay()
+    {
+        int stepsPerDay = Mathf.Max(1, germinationStepsPerDay);
+        while (germinationStepsDoneToday < stepsPerDay)
+        {
+            seedManager.GerminationStep();
+            germinationStepsDoneToday++;
+        }
+        germinationStepsDoneToday = 0;
+        daySimTime = 0f;
     }
 
     private void AdvanceSimTick()

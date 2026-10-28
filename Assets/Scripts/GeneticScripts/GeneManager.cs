@@ -1,9 +1,5 @@
 using UnityEngine;
 using System.Collections.Generic;
-using Unity.Burst;
-using Unity.Collections;
-using Unity.Jobs;
-using Unity.Mathematics;
 using Random = UnityEngine.Random;
 
 public class GeneManager : MonoBehaviour
@@ -101,7 +97,7 @@ public class GeneManager : MonoBehaviour
     /// The longer composition becomes the dominant composition (ties prefer maternal) and is recorded via dominantDNA.
     /// Phenotypes are calculated respecting that major composition; loci missing in a strand are skipped.
     /// </summary>
-    internal PlantGenome GenerateSeedGenome(List<Allele> maternalDNA, List<Allele> paternalDNA, int maternalGeneration = 0, int paternalGeneration = 0, string maternalOrigin = null, string paternalOrigin = null)
+    internal PlantGenome GenerateSeedGenome(List<Allele> maternalDNA, List<Allele> paternalDNA, int maternalGeneration = 0, int paternalGeneration = 0, string maternalOrigin = null, string paternalOrigin = null, string maternalSpeciesGuid = null, string paternalSpeciesGuid = null)
     {
         // [OPTIMIZED] Check cached flag instead of rebuilding
         if (!traitLookupBuilt || traitLookup == null || traitLookup.Length == 0)
@@ -121,6 +117,8 @@ public class GeneManager : MonoBehaviour
         genome.SetDominantDNA(useMaternalMajor);
         genome.generation = NextGeneration(maternalGeneration, paternalGeneration);
         genome.origin = PlantGenome.CombineOriginTags(maternalOrigin, paternalOrigin);
+        // Lineage identity survives only crosses within the same library species
+        genome.speciesGuid = maternalSpeciesGuid == paternalSpeciesGuid ? maternalSpeciesGuid : null;
         genome.phenotypes = new float[traitLookup.Length]; // start at zero for all traits
         genome.phenotypes = CalculatePhenotypes(genome, majorComp);
         return genome;
@@ -322,6 +320,7 @@ public class GeneManager : MonoBehaviour
         clone.maternalDNA = GenerateMutatedDNA(parent.maternalDNA, normalizedRadiation, allowStructural, allowStructural ? dominantComposition : null);
         clone.paternalDNA = GenerateMutatedDNA(parent.paternalDNA, normalizedRadiation, allowStructural, allowStructural ? dominantComposition : null);
         clone.origin = parent.origin;
+        clone.speciesGuid = parent.speciesGuid;
 
         // Rebuild composition from the longer strand; tie keeps parent's dominant strand for determinism.
         bool useMaternalMajor = clone.maternalDNA.Count > clone.paternalDNA.Count
@@ -373,150 +372,72 @@ public class GeneManager : MonoBehaviour
             traitLookupBuilt = true;
         }
 
-        float[] calcPhenotypes = new float[traitLookup.Length];
+        int traitCount = traitLookup.Length;
+        float[] calcPhenotypes = new float[traitCount];
 
         if (composition == null)
         {
             composition = BuildCompositionFromDNA(genome.maternalDNA);
         }
 
-        // [OPTIMIZED] Burst job to compute phenotypes in parallel per trait
-        // Reuse composition data directly without intermediate ToArray() calls
-        int traitCount = traitLookup.Length;
-        int locusCount = composition.Count;
+        // [OPTIMIZED] Single pass over loci, accumulating per trait. Replaces a Burst job whose
+        // NativeArray allocation and scheduling cost far exceeded the work for ~23 traits.
+        int[] totalAllele = new int[traitCount];
+        float[] maxAllele = new float[traitCount];
+        List<Allele> maternal = genome.maternalDNA;
+        List<Allele> paternal = genome.paternalDNA;
 
-        NativeArray<float> outPhen = new NativeArray<float>(traitCount, Allocator.TempJob);
-        NativeArray<int> compArr = new NativeArray<int>(composition.ToArray(), Allocator.TempJob);
-        NativeArray<Allele> matArr = new NativeArray<Allele>(genome.maternalDNA.ToArray(), Allocator.TempJob);
-        NativeArray<Allele> patArr = new NativeArray<Allele>(genome.paternalDNA.ToArray(), Allocator.TempJob);
-        NativeArray<float> traitMin = new NativeArray<float>(traitCount, Allocator.TempJob);
-        NativeArray<float> traitMax = new NativeArray<float>(traitCount, Allocator.TempJob);
-        NativeArray<float> traitBase = new NativeArray<float>(traitCount, Allocator.TempJob);
-
-        for (int i = 0; i < traitCount; i++)
+        for (int i = 0; i < composition.Count; i++)
         {
-            if (traitLookup[i] != null)
+            int traitId = composition[i];
+            if (traitId < 0 || traitId >= traitCount)
+                continue;
+
+            bool matOK = i < maternal.Count && maternal[i].traitId == traitId;
+            bool patOK = i < paternal.Count && paternal[i].traitId == traitId;
+
+            if (matOK && patOK)
             {
-                traitMin[i] = traitLookup[i].minValue;
-                traitMax[i] = traitLookup[i].maxValue;
-                traitBase[i] = traitLookup[i].baseValue > 0f ? traitLookup[i].baseValue : 0f;
+                if (maternal[i].dominance != paternal[i].dominance)
+                {
+                    totalAllele[traitId] += maternal[i].dominance ? maternal[i].value : paternal[i].value;
+                }
+                else
+                {
+                    totalAllele[traitId] += (maternal[i].value + paternal[i].value) / 2;
+                }
+            }
+            else if (matOK)
+            {
+                totalAllele[traitId] += maternal[i].value;
+            }
+            else if (patOK)
+            {
+                totalAllele[traitId] += paternal[i].value;
             }
             else
             {
-                traitMin[i] = 0f;
-                traitMax[i] = 0f;
-                traitBase[i] = 0f;
+                continue; // Neither strand carries this trait at this locus
             }
+            maxAllele[traitId] += MAX_ALLELE_VALUE;
         }
 
-        var job = new PhenotypeJob
+        for (int traitId = 0; traitId < traitCount; traitId++)
         {
-            composition = compArr,
-            maternal = matArr,
-            paternal = patArr,
-            traitMin = traitMin,
-            traitMax = traitMax,
-            traitBase = traitBase,
-            maxAlleleValue = MAX_ALLELE_VALUE,
-            locusCount = locusCount,
-            output = outPhen
-        };
+            TraitDefinition def = traitLookup[traitId];
+            if (maxAllele[traitId] <= 0.0001f)
+            {
+                // No loci for this trait -> fallback to base value (or 0 if unset)
+                calcPhenotypes[traitId] = def != null && def.baseValue > 0f ? def.baseValue : 0f;
+                continue;
+            }
 
-        JobHandle handle = job.Schedule(traitCount, 1);
-        handle.Complete();
-
-        outPhen.CopyTo(calcPhenotypes);
-
-        outPhen.Dispose();
-        compArr.Dispose();
-        matArr.Dispose();
-        patArr.Dispose();
-        traitMin.Dispose();
-        traitMax.Dispose();
-        traitBase.Dispose();
+            float minV = def != null ? def.minValue : 0f;
+            float maxV = def != null ? def.maxValue : 0f;
+            calcPhenotypes[traitId] = Mathf.LerpUnclamped(minV, maxV, totalAllele[traitId] / maxAllele[traitId]);
+        }
 
         return calcPhenotypes;
-    }
-
-    [BurstCompile]
-    private struct PhenotypeJob : IJobParallelFor
-    {
-        [ReadOnly] public NativeArray<int> composition;
-        [ReadOnly] public NativeArray<Allele> maternal;
-        [ReadOnly] public NativeArray<Allele> paternal;
-        [ReadOnly] public NativeArray<float> traitMin;
-        [ReadOnly] public NativeArray<float> traitMax;
-        [ReadOnly] public NativeArray<float> traitBase;
-        public int locusCount;
-        public float maxAlleleValue;
-        public NativeArray<float> output;
-
-        public void Execute(int traitId)
-        {
-            TraitDefinitionExists(traitId, out float minV, out float maxV);
-
-            int totalAllele = 0;
-            float maxAllele = 0f;
-            bool hasLocus = false;
-
-            for (int i = 0; i < locusCount; i++)
-            {
-                if (composition[i] != traitId) continue;
-                hasLocus = true;
-
-                bool matOK = i < maternal.Length && maternal[i].traitId == traitId;
-                bool patOK = i < paternal.Length && paternal[i].traitId == traitId;
-
-                if (matOK && !patOK)
-                {
-                    totalAllele += maternal[i].value;
-                    maxAllele += maxAlleleValue;
-                    continue;
-                }
-                if (patOK && !matOK)
-                {
-                    totalAllele += paternal[i].value;
-                    maxAllele += maxAlleleValue;
-                    continue;
-                }
-                if (matOK && patOK && maternal[i].traitId != paternal[i].traitId)
-                {
-                    // composition aligns to major DNA; take allele matching composition (maternal or paternal)
-                    totalAllele += composition[i] == maternal[i].traitId ? maternal[i].value : paternal[i].value;
-                    maxAllele += maxAlleleValue;
-                    continue;
-                }
-
-                if (matOK && patOK)
-                {
-                    if (maternal[i].dominance != paternal[i].dominance)
-                    {
-                        totalAllele += maternal[i].dominance ? maternal[i].value : paternal[i].value;
-                    }
-                    else
-                    {
-                        totalAllele += (maternal[i].value + paternal[i].value) / 2;
-                    }
-                    maxAllele += maxAlleleValue;
-                }
-            }
-
-            if (!hasLocus || maxAllele <= 0.0001f)
-            {
-                float baseVal = traitBase.Length > traitId ? traitBase[traitId] : 0f;
-                output[traitId] = baseVal; // No loci for this trait -> fallback to base value (or 0 if unset)
-                return;
-            }
-
-            float normalized = totalAllele / maxAllele;
-            output[traitId] = math.lerp(minV, maxV, normalized);
-        }
-
-        private void TraitDefinitionExists(int id, out float minV, out float maxV)
-        {
-            minV = traitMin.Length > id ? traitMin[id] : 0f;
-            maxV = traitMax.Length > id ? traitMax[id] : 0f;
-        }
     }
 
     internal List<Allele> GetPooledGeneList()

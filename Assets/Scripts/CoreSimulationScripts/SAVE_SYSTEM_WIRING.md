@@ -13,7 +13,10 @@ This document explains how to wire the current save system in Unity after the re
 - Manual save:
   - Writes to: `Application.persistentDataPath/ManualSaves`
   - Uses player-provided name as filename.
-  - If same name already exists, a timestamp/suffix is appended automatically.
+  - If a save with the same name already exists, it is overwritten.
+
+- All save, species-library, and preference files are written atomically (temp file, then swapped into place),
+  so a crash mid-write keeps the previous file instead of leaving a truncated one.
 
 - Loading:
   - Fully separated into `SimulationLoadSystem`.
@@ -88,17 +91,36 @@ Behavior:
 
 ## 5. Notes From Previous Changes
 
-- Full snapshot load path is implemented:
-  - Rebuilds map size/topology.
-  - Restores environment settings, then recalculates tile-level environment values from those base settings.
-  - Restores grass instances, seeds, genomes, genus/species runtime registry, counters, and time state.
-  - Applies saved genus/species history from snapshot so historical entries persist (including non-living records).
-  - `GenusManager.preserveHistoricalSpecies` defaults to `true`, so runtime pruning does not delete extinct history entries.
+- Full snapshot load path is implemented, in two phases:
+  - Phase 1 (no scene changes): parse, validate, migrate legacy schemas, rebuild all genomes. A bad file fails here and the running simulation is untouched.
+  - Phase 2: rebuild map size/topology, restore environment settings (tile-level values are recalculated from them),
+    plants, seeds, counters, time state, and the selected season.
 
-- Schema version is now `6`:
+- Schema version is now `8` (schemas `6` and `7` remain loadable and are migrated in memory on load):
+  - Tiles hold environment only. Plants (`plants`) and seeds (`seeds`) are separate lists keyed by tile coordinates.
+  - Every genome is stored once in `genomes` and referenced by index (`-1` = none); seeds from one parent share one entry.
+  - Genomes carry `speciesGuid`, the library species identity (see Species Library below).
+  - Saves the exact day phase (day/night switch state, accumulators, germination schedule) and `currentSeason`.
+    Legacy saves reconstruct the day phase from the light level, skip germination for the rest of the loaded day,
+    and infer the season from the closest seasonal temperature.
+  - Saves seed `germinationCue` / `coldPreservation`, plant `nightEffect` and per-day clone attempts, and the
+    `maxCloneAttemptsPerDay` setting (older saves load it as 0 = unlimited).
+  - Genomes no longer need names to be saved; any genome with DNA is kept (previously unnamed genomes were silently dropped).
+  - Known gap: an in-progress season transition is not resumed; the loaded temperature/noon stay at their mid-blend values.
+
+- Species Library (`persistentDataPath/species`, managed by `GenusManager`):
+  - Each species is identified by a GUID; genus/species names are display labels. New files are named `<guid>.json`.
+  - Name clashes (case-insensitive) are resolved by suffixing the epithet: `bar` -> `bar (2)`.
+  - Legacy files (no GUID) get a deterministic content-derived GUID and are upgraded in place on first load,
+    so bundled default species get the same GUID on every install.
+  - `GenusManager.RenameSpecies(guid, genus, species, out finalName)` renames an entry (suffixing on clash) and
+    updates matching genomes in a running simulation. `LibraryChanged` fires after any add/rename/delete.
+
+- Schema `7` notes (still apply):
   - Includes saved `noonTimeHours` for day/night continuity.
   - No longer stores per-tile caches for `temperature`, `hydration`, `light`, `radiation`.
   - Keeps per-tile `oxygen` so local oxygen state from grass/environment history is preserved.
   - No longer stores genome `phenotypes`; phenotypes are rebuilt from DNA on load.
   - Replaces genome `cachedDNAComposition` with compact `dominantDNA` strand indicator (`0 = M`, `1 = P`).
-  - Loader expects current schema only (prototype mode, no backward compatibility path).
+  - Adds map-level soil organic carbon and available N/P/K pools plus the atmospheric carbon reservoir.
+  - Loader supports schemas `6` to `8`; older schemas are rejected.

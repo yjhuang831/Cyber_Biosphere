@@ -57,6 +57,7 @@ public class MapManager : MonoBehaviour
     private Vector3 rightClickStartScreen;
     private const float RIGHT_CLICK_DRAG_THRESHOLD = 8f;
     internal bool allowTileModification = true; // Flag to enable/disable tile modification
+    private bool isInitialized = false; // Set once the grid exists, so a load applied before Start() is not wiped
 
     void Awake()
     {
@@ -71,7 +72,19 @@ public class MapManager : MonoBehaviour
     {
         isSelecting = false;
         isShowing = false;
-        InitializeMap();
+        EnsureInitialized();
+    }
+
+    /// <summary>
+    /// Builds the default map if nothing (e.g. a snapshot load) has built it yet.
+    /// Safe to call from other managers' Start() regardless of script execution order.
+    /// </summary>
+    internal void EnsureInitialized()
+    {
+        if (!isInitialized)
+        {
+            InitializeMap();
+        }
     }
 
     void Update()
@@ -150,7 +163,7 @@ public class MapManager : MonoBehaviour
                     EnvironmentData target = GetTileEnvironmentData(gridPos);
                     if (target.grass != null)
                     {
-                        grassManager.RemoveGrassInstance(gridPos, target);
+                        grassManager.RemoveGrassInstance(gridPos, target, DeathCause.TerrainChange);
                     }
                 }
             }
@@ -189,7 +202,7 @@ public class MapManager : MonoBehaviour
                 grassTilemap.SetColor(tilePos, Color.clear);
 
                 // Store directly into array
-                tileEnvironmentData[x, y] = new EnvironmentData
+                EnvironmentData environmentData = new EnvironmentData
                 {
                     radiation = environmentManager.waterRadiation,
                     temperature = 20f,
@@ -201,6 +214,8 @@ public class MapManager : MonoBehaviour
                     // Cache neighbor position
                     immediateNeighbors = new List<Vector3Int>()
                 };
+                environmentManager.InitializeNutrientPools(environmentData, true);
+                tileEnvironmentData[x, y] = environmentData;
 
                 for (int i = -1; i <= 1; i++)
                 {
@@ -220,6 +235,7 @@ public class MapManager : MonoBehaviour
             }
         }
 
+        isInitialized = true;
         environmentManager.UpdateTileEnvironment(null, true);
         // [OPTIMIZED] Static temperature offsets cached during above fullUpdate
     }
@@ -250,6 +266,7 @@ public class MapManager : MonoBehaviour
 
         EnvironmentData data = tileEnvironmentData[x, y];
         data.isWater = isWater;
+        environmentManager.InitializeNutrientPools(data, isWater);
         terrainTilemap.SetTile(tilePos, isWater ? waterTile : GetRandomLandTile());
 
         if (isWater)
@@ -275,6 +292,7 @@ public class MapManager : MonoBehaviour
         int y = tilePos.y + offsetY;
 
         tileEnvironmentData[x, y].isWater = isWater;
+        environmentManager.InitializeNutrientPools(tileEnvironmentData[x, y], isWater);
 
         // Update the tile's environmental data
         if (isWater)
@@ -315,7 +333,14 @@ public class MapManager : MonoBehaviour
     /// </summary>
     public List<Vector3Int> GetTilePosOfRange(Vector3Int center, int radius)
     {
-        List<Vector3Int> results = new List<Vector3Int>();
+        return GetTilePosOfRange(center, radius, new List<Vector3Int>());
+    }
+
+    /// <summary>
+    /// Non-allocating overload: appends positions to the caller's (e.g. pooled) list and returns it.
+    /// </summary>
+    public List<Vector3Int> GetTilePosOfRange(Vector3Int center, int radius, List<Vector3Int> results)
+    {
         for (int dx = -radius; dx <= radius; dx++)
         {
             for (int dy = -radius; dy <= radius; dy++)

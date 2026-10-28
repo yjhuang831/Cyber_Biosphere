@@ -1,10 +1,16 @@
 using UnityEngine;
+using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.RegularExpressions;
 
 /// <summary>
-/// Manages the user-facing local species save registry.
-/// Persists saved-species references and loads selected genomes on demand.
+/// Manages the user-facing local species library.
+/// Each species is identified by a GUID; genus/species names are display labels kept unique by suffixing ("bar (2)").
+/// Files are named by GUID, so renaming never moves files. Legacy files (named genus_species.json, no GUID) are
+/// assigned a deterministic GUID derived from their content and upgraded in place.
 /// </summary>
 public class GenusManager : MonoBehaviour
 {
@@ -26,14 +32,28 @@ public class GenusManager : MonoBehaviour
         private set => instance = value;
     }
 
+    internal class SpeciesEntry
+    {
+        public string guid;
+        public string genus;
+        public string species;
+        public string filePath;
+        public string DisplayName => genus + " " + species;
+    }
+
     private const string LOCAL_SPECIES_FOLDER = "species";
     private const string LOCAL_SPECIES_FILE_EXTENSION = ".json";
-    // Reference pointers to available species of significance (loaded on Awake)
-    internal readonly HashSet<string> Local_SpeciesReferences = new HashSet<string>();
-    // Full genome data for saved species (loaded on-demand, doesn't interrupt simulation)
+    private const int LIBRARY_FORMAT_VERSION = 2; // 1 = legacy (no GUID), 2 = GUID-identified
+    private static readonly Regex NumericSuffixPattern = new Regex(@"^(.*\S)\s\((\d+)\)$");
+
+    // Library index, keyed by species GUID (loaded on Awake; reads names only, genomes stay on disk)
+    internal readonly Dictionary<string, SpeciesEntry> Local_Species = new Dictionary<string, SpeciesEntry>();
+    // Full genome data for saved species (loaded on-demand, doesn't interrupt simulation), keyed by GUID
     internal readonly Dictionary<string, PlantGenomeState> Local_SpeciesGenomes = new Dictionary<string, PlantGenomeState>();
-    // Currently selected species from saved list (used during simulation)
+    // GUID of the species currently selected for planting
     internal string selectedSpeciesId;
+    // Raised after any add/rename/delete/reload so UI lists can refresh
+    internal event Action LibraryChanged;
 
     void Awake()
     {
@@ -50,8 +70,7 @@ public class GenusManager : MonoBehaviour
     }
 
     /// <summary>
-    /// Loads only species references (names) on Awake without interrupting simulation.
-    /// Full genome data is loaded on-demand via LoadLocalSpeciesData().
+    /// Rebuilds the library index from disk. Upgrades legacy files (adds GUID) and resolves name clashes by suffixing.
     /// </summary>
     internal void LoadLocalSpeciesReferences()
     {
@@ -63,40 +82,97 @@ public class GenusManager : MonoBehaviour
             CopyDefaultSpeciesFromStreamingAssets(folderPath);
         }
 
-        Local_SpeciesReferences.Clear();
+        Local_Species.Clear();
+        Local_SpeciesGenomes.Clear();
 
         try
         {
             string[] speciesFiles = Directory.GetFiles(folderPath, "*" + LOCAL_SPECIES_FILE_EXTENSION, SearchOption.TopDirectoryOnly);
+            Array.Sort(speciesFiles, StringComparer.OrdinalIgnoreCase); // Deterministic suffix assignment
             for (int i = 0; i < speciesFiles.Length; i++)
             {
-                string filePath = speciesFiles[i];
-                try
-                {
-                    string json = File.ReadAllText(filePath);
-                    LocalSpeciesData speciesData = JsonUtility.FromJson<LocalSpeciesData>(json);
-                    if (speciesData == null || speciesData.genome == null)
-                        continue;
-
-                    string genus = speciesData.genome.genus;
-                    string species = speciesData.genome.species;
-
-                    if (string.IsNullOrEmpty(genus) || string.IsNullOrEmpty(species))
-                        continue;
-
-                    string speciesId = BuildSpeciesId(genus.Trim(), species.Trim());
-                    Local_SpeciesReferences.Add(speciesId);
-                }
-                catch (System.Exception e)
-                {
-                    Debug.LogWarning("Skipped local species reference due to parse error: " + filePath + " | " + e.Message);
-                }
+                RegisterSpeciesFile(speciesFiles[i]);
             }
         }
-        catch (System.Exception e)
+        catch (Exception e)
         {
             Debug.LogError("Failed to load local species references: " + e.Message);
         }
+
+        if (!string.IsNullOrEmpty(selectedSpeciesId) && !Local_Species.ContainsKey(selectedSpeciesId))
+        {
+            selectedSpeciesId = null;
+        }
+        LibraryChanged?.Invoke();
+    }
+
+    private void RegisterSpeciesFile(string filePath)
+    {
+        LocalSpeciesData speciesData;
+        try
+        {
+            speciesData = JsonUtility.FromJson<LocalSpeciesData>(File.ReadAllText(filePath));
+        }
+        catch (Exception e)
+        {
+            Debug.LogWarning("Skipped local species file due to parse error: " + filePath + " | " + e.Message);
+            return;
+        }
+
+        PlantGenomeState genome = speciesData != null ? speciesData.genome : null;
+        if (genome == null || !HasDNA(genome))
+        {
+            Debug.LogWarning("Skipped local species file without genome data: " + filePath);
+            return;
+        }
+
+        string genus = NormalizeName(genome.genus);
+        string species = NormalizeName(genome.species);
+        if (string.IsNullOrEmpty(genus) || string.IsNullOrEmpty(species))
+        {
+            Debug.LogWarning("Skipped local species file without genus/species names: " + filePath);
+            return;
+        }
+
+        bool needsRewrite = speciesData.formatVersion < LIBRARY_FORMAT_VERSION;
+        string guid = NormalizeGuid(genome.speciesGuid);
+        if (guid == null)
+        {
+            guid = BuildContentGuid(genus, species, genome);
+            needsRewrite = true;
+        }
+
+        if (Local_Species.TryGetValue(guid, out SpeciesEntry existing))
+        {
+            Debug.LogWarning("Skipped species file '" + filePath + "': same species GUID as '" + existing.filePath + "' (duplicate copy?).");
+            return;
+        }
+
+        string uniqueSpecies = MakeUniqueSpeciesName(genus, species, guid);
+        if (uniqueSpecies != species)
+        {
+            Debug.LogWarning("Species '" + genus + " " + species + "' clashes with an existing name; listed as '" + genus + " " + uniqueSpecies + "'.");
+            species = uniqueSpecies;
+            needsRewrite = true;
+        }
+
+        genome.genus = genus;
+        genome.species = species;
+        genome.speciesGuid = guid;
+
+        if (needsRewrite)
+        {
+            try
+            {
+                WriteSpeciesFile(filePath, genome);
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning("Could not upgrade species file '" + filePath + "' (kept in memory only): " + e.Message);
+            }
+        }
+
+        Local_Species[guid] = new SpeciesEntry { guid = guid, genus = genus, species = species, filePath = filePath };
     }
 
     /// <summary>
@@ -104,8 +180,8 @@ public class GenusManager : MonoBehaviour
     /// </summary>
     private static void CopyDefaultSpeciesFromStreamingAssets(string targetFolder)
     {
-        string streamingPath = System.IO.Path.Combine(Application.streamingAssetsPath, "species");
-        
+        string streamingPath = Path.Combine(Application.streamingAssetsPath, "species");
+
         // Check if defaults exist in StreamingAssets
         if (!Directory.Exists(streamingPath))
         {
@@ -117,262 +193,262 @@ public class GenusManager : MonoBehaviour
             string[] defaultFiles = Directory.GetFiles(streamingPath, "*.json", SearchOption.TopDirectoryOnly);
             foreach (string filePath in defaultFiles)
             {
-                string fileName = System.IO.Path.GetFileName(filePath);
-                string destPath = System.IO.Path.Combine(targetFolder, fileName);
+                string fileName = Path.GetFileName(filePath);
+                string destPath = Path.Combine(targetFolder, fileName);
                 File.Copy(filePath, destPath, overwrite: false);
             }
             Debug.Log("Copied " + defaultFiles.Length + " default species from StreamingAssets.");
         }
-        catch (System.Exception e)
+        catch (Exception e)
         {
             Debug.LogWarning("Failed to copy default species from StreamingAssets: " + e.Message);
         }
     }
 
+    internal bool TryGetSpeciesEntry(string speciesGuid, out SpeciesEntry entry)
+    {
+        entry = null;
+        return !string.IsNullOrEmpty(speciesGuid) && Local_Species.TryGetValue(speciesGuid, out entry);
+    }
+
     /// <summary>
     /// Selects a species from the saved list for use during simulation.
     /// </summary>
-    internal void SelectSpecies(string speciesId)
+    internal void SelectSpecies(string speciesGuid)
     {
-        if (string.IsNullOrEmpty(speciesId) || !Local_SpeciesReferences.Contains(speciesId))
+        if (string.IsNullOrEmpty(speciesGuid) || !Local_Species.ContainsKey(speciesGuid))
             return;
-        selectedSpeciesId = speciesId;
+        selectedSpeciesId = speciesGuid;
     }
 
     /// <summary>
-    /// Deletes a saved species file and removes it from the references.
+    /// Deletes a saved species file. Plants already in a simulation keep their genome and GUID.
     /// </summary>
-    internal void DeleteSavedSpecies(string speciesId)
+    internal void DeleteSavedSpecies(string speciesGuid)
     {
-        if (string.IsNullOrEmpty(speciesId) || !Local_SpeciesReferences.Contains(speciesId))
+        if (!TryGetSpeciesEntry(speciesGuid, out SpeciesEntry entry))
             return;
 
         try
         {
-            // Parse speciesId to get genus and species
-            string[] parts = speciesId.Split('_');
-            if (parts.Length < 2)
-                return;
-
-            string genus = parts[0];
-            string species = parts[1];
-
-            string filePath = GetLocalSpeciesFilePath(genus, species);
-            if (File.Exists(filePath))
+            if (File.Exists(entry.filePath))
             {
-                File.Delete(filePath);
-                Local_SpeciesReferences.Remove(speciesId);
-                Local_SpeciesGenomes.Remove(speciesId);
-                if (selectedSpeciesId == speciesId)
-                {
-                    selectedSpeciesId = null;
-                }
-                Debug.Log("Deleted saved species: " + speciesId);
+                File.Delete(entry.filePath);
             }
+            Local_Species.Remove(speciesGuid);
+            Local_SpeciesGenomes.Remove(speciesGuid);
+            if (selectedSpeciesId == speciesGuid)
+            {
+                selectedSpeciesId = null;
+            }
+            Debug.Log("Deleted saved species: " + entry.DisplayName);
+            LibraryChanged?.Invoke();
         }
-        catch (System.Exception e)
+        catch (Exception e)
         {
-            Debug.LogError("Failed to delete species \"" + speciesId + "\": " + e.Message);
+            Debug.LogError("Failed to delete species \"" + entry.DisplayName + "\": " + e.Message);
         }
     }
 
     /// <summary>
-    /// Attempts to load a single saved species genome by ID. Reads only the specific file needed.
+    /// Attempts to load a single saved species genome by GUID. Reads only the specific file needed.
     /// Caches the result in Local_SpeciesGenomes for future use.
     /// </summary>
-    internal bool TryGetSavedSpeciesGenome(string speciesId, out PlantGenomeState genomeState)
+    internal bool TryGetSavedSpeciesGenome(string speciesGuid, out PlantGenomeState genomeState)
     {
         genomeState = null;
 
-        if (string.IsNullOrEmpty(speciesId))
+        if (string.IsNullOrEmpty(speciesGuid))
             return false;
 
         // Check if already cached
-        if (Local_SpeciesGenomes.TryGetValue(speciesId, out genomeState))
+        if (Local_SpeciesGenomes.TryGetValue(speciesGuid, out genomeState))
             return true;
 
-        // Check if species exists in references
-        if (!Local_SpeciesReferences.Contains(speciesId))
+        if (!TryGetSpeciesEntry(speciesGuid, out SpeciesEntry entry) || !File.Exists(entry.filePath))
             return false;
 
         try
         {
-            // Parse the speciesId to get genus and species
-            string[] parts = speciesId.Split('_');
-            if (parts.Length < 2)
-                return false;
-
-            string genus = parts[0];
-            string species = parts[1];
-
-            string filePath = GetLocalSpeciesFilePath(genus, species);
-            if (!File.Exists(filePath))
-                return false;
-
-            string json = File.ReadAllText(filePath);
-            LocalSpeciesData speciesData = JsonUtility.FromJson<LocalSpeciesData>(json);
-
+            LocalSpeciesData speciesData = JsonUtility.FromJson<LocalSpeciesData>(File.ReadAllText(entry.filePath));
             if (speciesData == null || speciesData.genome == null)
                 return false;
 
-            // Cache it for future use
+            // The index is authoritative for identity and names (covers files not yet upgraded on disk)
             genomeState = speciesData.genome;
-            Local_SpeciesGenomes[speciesId] = genomeState;
+            genomeState.speciesGuid = entry.guid;
+            genomeState.genus = entry.genus;
+            genomeState.species = entry.species;
+            Local_SpeciesGenomes[speciesGuid] = genomeState;
             return true;
         }
-        catch (System.Exception e)
+        catch (Exception e)
         {
-            Debug.LogWarning("Failed to load species genome '" + speciesId + "': " + e.Message);
+            Debug.LogWarning("Failed to load species genome '" + entry.DisplayName + "': " + e.Message);
             return false;
         }
     }
 
-
     /// <summary>
-    /// Saves a species of significant to local persistent storage.
-    /// Creates one file per species with full genome data.
+    /// Saves a genome as a new library species with a fresh GUID. If the name is already taken, a numeric
+    /// suffix is added to the species epithet ("bar" -> "bar (2)"); the saved entry (final name, GUID) is returned.
     /// </summary>
-    public bool SaveLocalSpeciesGenome(PlantGenome genome, string genusName, string speciesName)
+    internal bool SaveLocalSpeciesGenome(PlantGenome genome, string genusName, string speciesName, out SpeciesEntry savedEntry)
     {
-        if (genome == null)
+        savedEntry = null;
+        if (genome == null || ((genome.maternalDNA == null || genome.maternalDNA.Count == 0) && (genome.paternalDNA == null || genome.paternalDNA.Count == 0)))
         {
-            Debug.LogWarning("SaveLocalSpeciesGenome skipped: genome is null.");
+            Debug.LogWarning("SaveLocalSpeciesGenome skipped: genome is null or has no DNA.");
             return false;
         }
 
-        if (!TryNormalizeTaxonomyNames(genusName, speciesName, out string genus, out string species))
+        string genus = NormalizeName(genusName);
+        string species = NormalizeName(speciesName);
+        if (string.IsNullOrEmpty(genus) || string.IsNullOrEmpty(species))
         {
             Debug.LogWarning("SaveLocalSpeciesGenome skipped: genus or species name is empty.");
             return false;
         }
 
+        string guid = Guid.NewGuid().ToString("N");
+        species = MakeUniqueSpeciesName(genus, species, guid);
+        PlantGenomeState state = SerializeGenomeForLocalStore(genome, genus, species, guid);
+        string filePath = Path.Combine(GetLocalSpeciesDirectoryPath(), guid + LOCAL_SPECIES_FILE_EXTENSION);
+
         try
         {
-            if (HasSanitizedSpeciesFileCollision(genus, species))
-            {
-                Debug.LogWarning("SaveLocalSpeciesGenome skipped: species '" + genus + " " + species + "' collides with another species file name after sanitization.");
-                return false;
-            }
-
-            string speciesId = BuildSpeciesId(genus, species);
-            string existingSpeciesKey = FindExistingSpeciesKeyIgnoreCase(Local_SpeciesGenomes, speciesId);
-            if (!string.IsNullOrEmpty(existingSpeciesKey) && existingSpeciesKey != speciesId)
-            {
-                Debug.LogWarning("SaveLocalSpeciesGenome skipped: species '" + speciesId + "' conflicts with existing species '" + existingSpeciesKey + "' (case-insensitive duplicate).");
-                return false;
-            }
-
-            bool isOverwrite = Local_SpeciesGenomes.ContainsKey(speciesId);
-            if (isOverwrite)
-            {
-                Debug.LogWarning("SaveLocalSpeciesGenome: overwriting existing local species entry for '" + genus + " " + species + "'.");
-            }
-
-            Local_SpeciesGenomes[speciesId] = SerializeGenomeForLocalStore(genome, genus, species);
-
-            WriteLocalSpeciesFile(speciesId, genus, species);
-            return true;
+            WriteSpeciesFile(filePath, state);
         }
-        catch (System.Exception e)
+        catch (Exception e)
         {
             Debug.LogError("SaveLocalSpeciesGenome failed: " + e.Message);
             return false;
         }
+
+        SpeciesEntry entry = new SpeciesEntry { guid = guid, genus = genus, species = species, filePath = filePath };
+        Local_Species[guid] = entry;
+        Local_SpeciesGenomes[guid] = state;
+        savedEntry = entry;
+        LibraryChanged?.Invoke();
+        return true;
     }
 
-
-    private void LoadLocalSpeciesData()
+    /// <summary>
+    /// Renames a library species (for the future rename UI). The GUID is unchanged, so saves and living plants
+    /// stay linked; a clashing name gets a numeric suffix. Also updates names on genomes of that species in the
+    /// running simulation, if one is loaded. Returns the final display name.
+    /// </summary>
+    internal bool RenameSpecies(string speciesGuid, string newGenusName, string newSpeciesName, out string finalDisplayName)
     {
-        string folderPath = GetLocalSpeciesDirectoryPath();
-        if (!Directory.Exists(folderPath))
+        finalDisplayName = null;
+        if (!TryGetSpeciesEntry(speciesGuid, out SpeciesEntry entry))
         {
-            Directory.CreateDirectory(folderPath);
-            return;
+            Debug.LogWarning("RenameSpecies skipped: unknown species GUID '" + speciesGuid + "'.");
+            return false;
         }
 
-        string[] speciesFiles = Directory.GetFiles(folderPath, "*" + LOCAL_SPECIES_FILE_EXTENSION, SearchOption.TopDirectoryOnly);
-        for (int i = 0; i < speciesFiles.Length; i++)
+        string genus = NormalizeName(newGenusName);
+        string species = NormalizeName(newSpeciesName);
+        if (string.IsNullOrEmpty(genus) || string.IsNullOrEmpty(species))
         {
-            string filePath = speciesFiles[i];
-            try
-            {
-                string json = File.ReadAllText(filePath);
-                LocalSpeciesData speciesData = JsonUtility.FromJson<LocalSpeciesData>(json);
-                if (speciesData == null || speciesData.genome == null)
-                    continue;
+            Debug.LogWarning("RenameSpecies skipped: genus or species name is empty.");
+            return false;
+        }
 
-                string genus = speciesData.genome.genus;
-                string species = speciesData.genome.species;
-                
-                if (string.IsNullOrEmpty(genus) || string.IsNullOrEmpty(species))
-                    continue;
+        if (!TryGetSavedSpeciesGenome(speciesGuid, out PlantGenomeState state))
+        {
+            Debug.LogWarning("RenameSpecies failed: could not read species file for '" + entry.DisplayName + "'.");
+            return false;
+        }
 
-                genus = genus.Trim();
-                species = species.Trim();
+        species = MakeUniqueSpeciesName(genus, species, speciesGuid);
+        string oldGenus = entry.genus;
+        string oldSpecies = entry.species;
 
-                if (string.IsNullOrEmpty(genus) || string.IsNullOrEmpty(species))
-                    continue;
+        state.genus = genus;
+        state.species = species;
+        try
+        {
+            WriteSpeciesFile(entry.filePath, state);
+        }
+        catch (Exception e)
+        {
+            state.genus = oldGenus;
+            state.species = oldSpecies;
+            Debug.LogError("RenameSpecies failed: " + e.Message);
+            return false;
+        }
 
-                string speciesId = BuildSpeciesId(genus, species);
-                string existingSpeciesKey = FindExistingSpeciesKeyIgnoreCase(Local_SpeciesGenomes, speciesId);
-                if (!string.IsNullOrEmpty(existingSpeciesKey) && existingSpeciesKey != speciesId)
-                {
-                    Debug.LogWarning("Skipping species '" + speciesId + "' from file due to case-insensitive duplicate of existing species '" + existingSpeciesKey + "'.");
-                    continue;
-                }
+        entry.genus = genus;
+        entry.species = species;
+        finalDisplayName = entry.DisplayName;
 
-                if (HasSanitizedSpeciesFileCollision(genus, species))
-                {
-                    Debug.LogWarning("Skipping species '" + speciesId + "' from file due to sanitized file-name collision with another species.");
-                    continue;
-                }
+        GrassManager grassManager = FindFirstObjectByType<GrassManager>();
+        if (grassManager != null)
+        {
+            grassManager.ApplySpeciesRename(speciesGuid, oldSpecies, genus, species);
+        }
 
-                Local_SpeciesGenomes[speciesId] = speciesData.genome;
-            }
-            catch (System.Exception e)
-            {
-                Debug.LogWarning("Skipped local species file due to parse error: " + filePath + " | " + e.Message);
-            }
+        LibraryChanged?.Invoke();
+        return true;
+    }
+
+    /// <summary>
+    /// Returns the species epithet, suffixed if needed so "genus species" is unique in the library
+    /// (case-insensitive), ignoring the entry with excludeGuid. An existing " (n)" suffix is replaced, not stacked.
+    /// </summary>
+    internal string MakeUniqueSpeciesName(string genus, string species, string excludeGuid)
+    {
+        if (!IsNameTaken(genus, species, excludeGuid))
+            return species;
+
+        string baseSpecies = species;
+        Match match = NumericSuffixPattern.Match(species);
+        if (match.Success)
+        {
+            baseSpecies = match.Groups[1].Value;
+        }
+
+        for (int n = 2; ; n++)
+        {
+            string candidate = baseSpecies + " (" + n + ")";
+            if (!IsNameTaken(genus, candidate, excludeGuid))
+                return candidate;
         }
     }
 
-    private void WriteLocalSpeciesFile(string speciesId, string genus, string species)
+    private bool IsNameTaken(string genus, string species, string excludeGuid)
     {
-        if (string.IsNullOrWhiteSpace(speciesId) || string.IsNullOrWhiteSpace(genus) || string.IsNullOrWhiteSpace(species))
-            return;
-
-        if (!Local_SpeciesGenomes.TryGetValue(speciesId, out PlantGenomeState genomeState))
-            return;
-
-        if (HasSanitizedSpeciesFileCollision(genus, species))
+        foreach (SpeciesEntry entry in Local_Species.Values)
         {
-            Debug.LogWarning("WriteLocalSpeciesFile skipped for species '" + speciesId + "' due to sanitized file-name collision.");
-            return;
+            if (entry.guid == excludeGuid)
+                continue;
+            if (string.Equals(entry.genus, genus, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(entry.species, species, StringComparison.OrdinalIgnoreCase))
+                return true;
         }
+        return false;
+    }
 
-        string folderPath = GetLocalSpeciesDirectoryPath();
-        Directory.CreateDirectory(folderPath);
-
+    private static void WriteSpeciesFile(string filePath, PlantGenomeState genome)
+    {
         LocalSpeciesData speciesData = new LocalSpeciesData
         {
-            genome = genomeState
+            formatVersion = LIBRARY_FORMAT_VERSION,
+            savedAtUtc = DateTime.UtcNow.ToString("O"),
+            genome = genome
         };
-
-        string json = JsonUtility.ToJson(speciesData, true);
-        string filePath = GetLocalSpeciesFilePath(genus, species);
-        File.WriteAllText(filePath, json);
+        SaveFileUtility.WriteAllTextAtomic(filePath, JsonUtility.ToJson(speciesData, true));
     }
 
-    private static PlantGenomeState SerializeGenomeForLocalStore(PlantGenome genome, string genusName = null, string speciesName = null)
+    private static PlantGenomeState SerializeGenomeForLocalStore(PlantGenome genome, string genus, string species, string speciesGuid)
     {
-        string resolvedGenus = string.IsNullOrWhiteSpace(genusName) ? genome.genus : genusName.Trim();
-        string resolvedSpecies = string.IsNullOrWhiteSpace(speciesName) ? genome.species : speciesName.Trim();
-
         PlantGenomeState state = new PlantGenomeState
         {
-            genus = resolvedGenus,
-            species = resolvedSpecies,
+            genus = genus,
+            species = species,
             origin = null,
+            speciesGuid = speciesGuid,
             dominantDNA = genome.dominantDNA
         };
 
@@ -399,119 +475,61 @@ public class GenusManager : MonoBehaviour
         return state;
     }
 
+    /// <summary>
+    /// Deterministic GUID for legacy files: the same default species gets the same GUID on every install,
+    /// so saves made on one machine still match the library on another.
+    /// </summary>
+    private static string BuildContentGuid(string genus, string species, PlantGenomeState genome)
+    {
+        StringBuilder canonical = new StringBuilder();
+        canonical.Append(genus).Append('|').Append(species).Append('|').Append(genome.dominantDNA).Append('|');
+        AppendAlleles(canonical, genome.maternalDNA);
+        canonical.Append('|');
+        AppendAlleles(canonical, genome.paternalDNA);
+
+        using (MD5 md5 = MD5.Create())
+        {
+            byte[] hash = md5.ComputeHash(Encoding.UTF8.GetBytes(canonical.ToString()));
+            return new Guid(hash).ToString("N");
+        }
+    }
+
+    private static void AppendAlleles(StringBuilder builder, List<AlleleState> alleles)
+    {
+        if (alleles == null)
+            return;
+        for (int i = 0; i < alleles.Count; i++)
+        {
+            builder.Append(alleles[i].traitId).Append(':').Append(alleles[i].value).Append(':').Append(alleles[i].dominance ? '1' : '0').Append(';');
+        }
+    }
+
+    private static bool HasDNA(PlantGenomeState genome)
+    {
+        return (genome.maternalDNA != null && genome.maternalDNA.Count > 0)
+            || (genome.paternalDNA != null && genome.paternalDNA.Count > 0);
+    }
+
+    private static string NormalizeName(string name)
+    {
+        return string.IsNullOrWhiteSpace(name) ? string.Empty : Regex.Replace(name.Trim(), @"\s+", " ");
+    }
+
+    private static string NormalizeGuid(string guid)
+    {
+        return !string.IsNullOrWhiteSpace(guid) && Guid.TryParse(guid.Trim(), out Guid parsed) ? parsed.ToString("N") : null;
+    }
+
     private static string GetLocalSpeciesDirectoryPath()
     {
         return Path.Combine(Application.persistentDataPath, LOCAL_SPECIES_FOLDER);
     }
 
-    private static string GetLocalSpeciesFilePath(string genus, string species)
-    {
-        string safeGenus = SanitizeFileName(genus);
-        string safeSpecies = SanitizeFileName(species);
-        string filename = safeGenus + "_" + safeSpecies + LOCAL_SPECIES_FILE_EXTENSION;
-        return Path.Combine(GetLocalSpeciesDirectoryPath(), filename);
-    }
-
-    private static string SanitizeFileName(string input)
-    {
-        if (string.IsNullOrWhiteSpace(input))
-            return "unknown";
-
-        string result = input.Trim();
-        char[] invalid = Path.GetInvalidFileNameChars();
-        for (int i = 0; i < invalid.Length; i++)
-        {
-            result = result.Replace(invalid[i], '_');
-        }
-        return result;
-    }
-
-    private static bool TryNormalizeTaxonomyNames(string genusName, string speciesName, out string genus, out string species)
-    {
-        genus = string.IsNullOrWhiteSpace(genusName) ? string.Empty : genusName.Trim();
-        species = string.IsNullOrWhiteSpace(speciesName) ? string.Empty : speciesName.Trim();
-
-        if (string.IsNullOrEmpty(genus) || string.IsNullOrEmpty(species))
-            return false;
-
-        string sanitizedGenus = SanitizeFileName(genus);
-        if (string.IsNullOrEmpty(sanitizedGenus) || sanitizedGenus == "unknown")
-            return false;
-
-        return true;
-    }
-
-    private bool HasSanitizedSpeciesFileCollision(string genus, string species)
-    {
-        if (string.IsNullOrWhiteSpace(genus) || string.IsNullOrWhiteSpace(species))
-            return false;
-
-        string sanitizedTarget = SanitizeFileName(genus) + "_" + SanitizeFileName(species);
-        foreach (KeyValuePair<string, PlantGenomeState> kvp in Local_SpeciesGenomes)
-        {
-            PlantGenomeState existingGenome = kvp.Value;
-            if (existingGenome == null)
-                continue;
-
-            string existingGenus = existingGenome.genus;
-            string existingSpecies = existingGenome.species;
-            
-            if (string.IsNullOrWhiteSpace(existingGenus) || string.IsNullOrWhiteSpace(existingSpecies))
-                continue;
-
-            if (existingGenus == genus && existingSpecies == species)
-                continue;
-
-            string existingSanitized = SanitizeFileName(existingGenus) + "_" + SanitizeFileName(existingSpecies);
-            if (string.Equals(existingSanitized, sanitizedTarget, System.StringComparison.OrdinalIgnoreCase))
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    private static string FindExistingKeyIgnoreCase<TValue>(Dictionary<string, TValue> dictionary, string target)
-    {
-        if (dictionary == null || string.IsNullOrEmpty(target))
-            return null;
-
-        foreach (KeyValuePair<string, TValue> kvp in dictionary)
-        {
-            if (string.Equals(kvp.Key, target, System.StringComparison.OrdinalIgnoreCase))
-            {
-                return kvp.Key;
-            }
-        }
-
-        return null;
-    }
-
-    private static string FindExistingSpeciesKeyIgnoreCase(Dictionary<string, PlantGenomeState> dictionary, string speciesId)
-    {
-        if (dictionary == null || string.IsNullOrEmpty(speciesId))
-            return null;
-
-        foreach (KeyValuePair<string, PlantGenomeState> kvp in dictionary)
-        {
-            if (string.Equals(kvp.Key, speciesId, System.StringComparison.OrdinalIgnoreCase))
-            {
-                return kvp.Key;
-            }
-        }
-
-        return null;
-    }
-
-    private static string BuildSpeciesId(string genus, string species)
-    {
-        return genus + "_" + species;
-    }
-
-    [System.Serializable]
+    [Serializable]
     private class LocalSpeciesData
     {
+        public int formatVersion;
+        public string savedAtUtc;
         public PlantGenomeState genome;
     }
 }

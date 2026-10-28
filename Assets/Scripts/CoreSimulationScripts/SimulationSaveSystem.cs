@@ -13,8 +13,7 @@ public static class SimulationSaveSystem
         TimeController timeController,
         EnvironmentManager environmentManager,
         GrassManager grassManager,
-        SeedManager seedManager,
-        float totalSimulatedTimeSeconds)
+        SeedManager seedManager)
     {
         if (timeController == null || environmentManager == null || grassManager == null || seedManager == null)
         {
@@ -36,8 +35,7 @@ public static class SimulationSaveSystem
                 mapManager,
                 environmentManager,
                 grassManager,
-                seedManager,
-                totalSimulatedTimeSeconds);
+                seedManager);
 
             string autosavePath = BuildTimestampedAutosavePath(DateTime.Now);
             WriteSnapshotFile(autosavePath, snapshot);
@@ -62,7 +60,6 @@ public static class SimulationSaveSystem
         EnvironmentManager environmentManager,
         GrassManager grassManager,
         SeedManager seedManager,
-        float totalSimulatedTimeSeconds,
         string playerSaveName)
     {
         if (timeController == null || environmentManager == null || grassManager == null || seedManager == null)
@@ -92,8 +89,7 @@ public static class SimulationSaveSystem
                 mapManager,
                 environmentManager,
                 grassManager,
-                seedManager,
-                totalSimulatedTimeSeconds);
+                seedManager);
 
             string manualPath = BuildManualSavePath(sanitizedName);
             WriteSnapshotFile(manualPath, snapshot);
@@ -112,8 +108,7 @@ public static class SimulationSaveSystem
         MapManager mapManager,
         EnvironmentManager environmentManager,
         GrassManager grassManager,
-        SeedManager seedManager,
-        float totalSimulatedTimeSeconds)
+        SeedManager seedManager)
     {
         SimulationSnapshot snapshot = new SimulationSnapshot
         {
@@ -124,115 +119,170 @@ public static class SimulationSaveSystem
                 width = mapManager.width,
                 height = mapManager.height
             },
-            environment = new EnvironmentSettingsState
-            {
-                baseTemperature = environmentManager.baseTemperature,
-                hydroOffset = environmentManager.hydroOffset,
-                lightOffset = environmentManager.lightOffset,
-                seasonalTemperatureOffset = environmentManager.seasonalTemperatureOffset,
-                minTemperature = environmentManager.minTemperature,
-                maxTemperature = environmentManager.maxTemperature,
-                equatorialBoost = environmentManager.equatorialBoost,
-                polarPenalty = environmentManager.polarPenalty,
-                baseLandHydration = environmentManager.baseLandHydration,
-                waterRadiation = environmentManager.waterRadiation,
-                landRadiation = environmentManager.landRadiation,
-                waterOxygen = environmentManager.waterOxygen,
-                landOxygen = environmentManager.landOxygen,
-                dayNightCycleSpeed = environmentManager.dayNightCycleSpeed,
-                baseLightLevel = environmentManager.baseLightLevel,
-                waterMaxLightLevel = environmentManager.waterMaxLightLevel,
-                landMaxLightLevel = environmentManager.landMaxLightLevel
-            },
+            environment = CaptureEnvironmentSettings(environmentManager),
             time = new TimeState
             {
-                simDaysSinceStart = TimeController.simDaysSinceStart,
-                accumulatedAge = TimeController.accumulatedAge,
-                isNight = TimeController.isNight,
-                totalSimulatedTimeSeconds = totalSimulatedTimeSeconds,
-                noonTimeHours = timeController.noonTime,
                 daysPerYear = SeasonManager.daysPerYear
             },
             counters = new CounterState(),
-            grassSettings = new GrassSettingsState
-            {
-                metabolismCostPerAllele = grassManager.metabolismCostPerAllele,
-                plantAging = grassManager.plantAging,
-                agingRate = grassManager.agingRate,
-                baseGrowthCost = grassManager.baseGrowthCost,
-                flowerLimit = grassManager.flowerLimit,
-                maxSeedsPerTile = seedManager.maxSeedsPerTile
-            },
-            tiles = new List<TileState>(mapManager.GetAllTilePositions().Count)
+            grassSettings = CaptureGrassSettings(grassManager, seedManager),
+            tiles = new List<TileState>(mapManager.GetAllTilePositions().Count),
+            genomes = new List<PlantGenomeState>(),
+            plants = new List<GrassState>(),
+            seeds = new List<SeedState>()
         };
 
+        timeController.WriteTimeState(snapshot.time);
+        SeasonManager seasonManager = UnityEngine.Object.FindFirstObjectByType<SeasonManager>();
+        snapshot.time.currentSeason = seasonManager != null ? seasonManager.CurrentSeason : 0;
+
+        // Genomes are written once each; reference equality dedupes seeds sharing a parent's seed genome
+        GenomeTableWriter genomeTable = new GenomeTableWriter(snapshot.genomes);
+
         List<Vector3Int> allTiles = mapManager.GetAllTilePositions();
-        long serializedPlantCount = 0;
-        long serializedSeedCount = 0;
         for (int i = 0; i < allTiles.Count; i++)
         {
             Vector3Int tilePos = allTiles[i];
             EnvironmentData env = mapManager.GetTileEnvironmentData(tilePos);
-            TileState tile = new TileState
+            snapshot.tiles.Add(new TileState
             {
                 x = tilePos.x,
                 y = tilePos.y,
                 isWater = env.isWater,
-                oxygen = env.oxygen
-            };
+                oxygen = env.oxygen,
+                soilOrganicCarbon = env.soilOrganicCarbon,
+                dissolvedCarbon = env.dissolvedCarbon,
+                availableNitrogen = env.availableNitrogen,
+                availablePhosphorus = env.availablePhosphorus,
+                availablePotassium = env.availablePotassium
+            });
 
             if (grassManager.activeGrassInstances != null
                 && grassManager.activeGrassInstances.TryGetValue(tilePos, out GrassInstance liveGrass)
                 && liveGrass != null)
             {
-                if (!TryGetGenomeSnapshotInvalidReason(liveGrass.genome, out _))
+                int genomeIndex = genomeTable.IndexOf(liveGrass.genome);
+                if (genomeIndex >= 0)
                 {
-                    tile.grass = SerializeGrass(liveGrass);
-                    serializedPlantCount++;
+                    snapshot.plants.Add(SerializeGrass(liveGrass, genomeIndex, genomeTable.IndexOf(liveGrass.seedGenome)));
+                }
+                else
+                {
+                    Debug.LogWarning("Save: skipped plant at " + tilePos + " because its genome has no DNA.");
                 }
             }
 
-            if (seedManager.activeSeeds != null && seedManager.activeSeeds.TryGetValue(tilePos, out List<Seed> seeds) && seeds != null && seeds.Count > 0)
+            if (seedManager.activeSeeds != null && seedManager.activeSeeds.TryGetValue(tilePos, out List<Seed> seeds) && seeds != null)
             {
-                List<SeedState> serializedSeeds = new List<SeedState>(seeds.Count);
                 for (int s = 0; s < seeds.Count; s++)
                 {
-                    if (TryGetGenomeSnapshotInvalidReason(seeds[s].carriedGenome, out _))
+                    int genomeIndex = genomeTable.IndexOf(seeds[s].carriedGenome);
+                    if (genomeIndex >= 0)
                     {
-                        continue;
+                        snapshot.seeds.Add(SerializeSeed(seeds[s], tilePos, genomeIndex));
                     }
-
-                    SeedState serializedSeed = SerializeSeed(seeds[s]);
-                    if (serializedSeed == null)
-                    {
-                        continue;
-                    }
-
-                    serializedSeeds.Add(serializedSeed);
-                    serializedSeedCount++;
-                }
-
-                if (serializedSeeds.Count > 0)
-                {
-                    tile.seeds = serializedSeeds;
                 }
             }
-
-            snapshot.tiles.Add(tile);
         }
 
-        snapshot.counters.plantCount = serializedPlantCount;
-        snapshot.counters.seedCount = serializedSeedCount;
+        snapshot.counters.plantCount = snapshot.plants.Count;
+        snapshot.counters.seedCount = snapshot.seeds.Count;
 
         return snapshot;
     }
 
-    private static GrassState SerializeGrass(GrassInstance grass)
+    /// <summary>
+    /// Environment settings as saved in snapshots; also recorded in research run metadata.
+    /// </summary>
+    internal static EnvironmentSettingsState CaptureEnvironmentSettings(EnvironmentManager environmentManager)
+    {
+        return new EnvironmentSettingsState
+        {
+            baseTemperature = environmentManager.baseTemperature,
+            hydroOffset = environmentManager.hydroOffset,
+            lightOffset = environmentManager.lightOffset,
+            seasonalTemperatureOffset = environmentManager.seasonalTemperatureOffset,
+            minTemperature = environmentManager.minTemperature,
+            maxTemperature = environmentManager.maxTemperature,
+            equatorialBoost = environmentManager.equatorialBoost,
+            polarPenalty = environmentManager.polarPenalty,
+            baseLandHydration = environmentManager.baseLandHydration,
+            waterRadiation = environmentManager.waterRadiation,
+            landRadiation = environmentManager.landRadiation,
+            waterOxygen = environmentManager.waterOxygen,
+            landOxygen = environmentManager.landOxygen,
+            dayNightCycleSpeed = environmentManager.dayNightCycleSpeed,
+            baseLightLevel = environmentManager.baseLightLevel,
+            waterMaxLightLevel = environmentManager.waterMaxLightLevel,
+            landMaxLightLevel = environmentManager.landMaxLightLevel,
+            atmosphericCarbon = environmentManager.atmosphericCarbon
+        };
+    }
+
+    /// <summary>
+    /// Plant/seed rule settings as saved in snapshots; also recorded in research run metadata.
+    /// </summary>
+    internal static GrassSettingsState CaptureGrassSettings(GrassManager grassManager, SeedManager seedManager)
+    {
+        return new GrassSettingsState
+        {
+            metabolismCostPerAllele = grassManager.metabolismCostPerAllele,
+            plantAging = grassManager.plantAging,
+            agingRate = grassManager.agingRate,
+            baseGrowthCost = grassManager.baseGrowthCost,
+            flowerLimit = grassManager.flowerLimit,
+            maxSeedsPerTile = seedManager.maxSeedsPerTile,
+            maxCloneAttemptsPerDay = grassManager.maxCloneAttemptsPerDay
+        };
+    }
+
+    /// <summary>
+    /// Assigns each distinct genome object one slot in the snapshot's genome table.
+    /// </summary>
+    private class GenomeTableWriter
+    {
+        private readonly List<PlantGenomeState> table;
+        private readonly Dictionary<PlantGenome, int> indices = new Dictionary<PlantGenome, int>();
+
+        internal GenomeTableWriter(List<PlantGenomeState> table)
+        {
+            this.table = table;
+        }
+
+        /// <summary>Returns the genome's table index, adding it if new; -1 for null or DNA-less genomes.</summary>
+        internal int IndexOf(PlantGenome genome)
+        {
+            if (genome == null)
+                return -1;
+            if (indices.TryGetValue(genome, out int index))
+                return index;
+
+            PlantGenomeState state = SerializeGenome(genome);
+            index = state != null ? table.Count : -1;
+            if (state != null)
+            {
+                table.Add(state);
+            }
+            indices[genome] = index;
+            return index;
+        }
+    }
+
+    private static GrassState SerializeGrass(GrassInstance grass, int genomeIndex, int seedGenomeIndex)
     {
         return new GrassState
         {
             tileX = grass.tilePosition.x,
             tileY = grass.tilePosition.y,
+            genomeIndex = genomeIndex,
+            seedGenomeIndex = seedGenomeIndex,
+            nightEffect = grass.nightEffect,
+            lastCloneDay = grass.lastCloneDay,
+            cloneAttemptsToday = grass.cloneAttemptsToday,
+            ageingExposureToday = grass.ageingExposureToday,
+            dormantTimeToday = grass.dormantTimeToday,
+            daylightPotentialSum = grass.daylightPotentialSum,
+            daylightSampleTime = grass.daylightSampleTime,
             energyStored = grass.energyStored,
             grassDensity = grass.grassDensity,
             age = grass.age,
@@ -248,31 +298,28 @@ public static class SimulationSaveSystem
             maturityThreshold = grass.maturityThreshold,
             seedingEnergy = grass.seedingEnergy,
             usedPhotosynthesisLastTick = grass.usedPhotosynthesisLastTick,
-            usedRespirationLastTick = grass.usedRespirationLastTick,
-            genome = SerializeGenome(grass.genome),
-            seedGenome = SerializeGenome(grass.seedGenome)
+            usedRespirationLastTick = grass.usedRespirationLastTick
         };
     }
 
-    private static SeedState SerializeSeed(Seed seed)
+    private static SeedState SerializeSeed(Seed seed, Vector3Int tilePos, int genomeIndex)
     {
-        if (seed.carriedGenome == null || TryGetGenomeSnapshotInvalidReason(seed.carriedGenome, out _))
-        {
-            return null;
-        }
-
         return new SeedState
         {
+            tileX = tilePos.x,
+            tileY = tilePos.y,
+            genomeIndex = genomeIndex,
             parentGenus = seed.parentGenus,
             storedEnergy = seed.storedEnergy,
             germinationEnergy = seed.germinationEnergy,
             germinationStage = seed.germinationStage,
             sproutStage = seed.sproutStage,
-            carriedGenome = SerializeGenome(seed.carriedGenome)
+            germinationCue = seed.germinationCue,
+            coldPreservation = seed.coldPreservation
         };
     }
 
-    private static PlantGenomeState SerializeGenome(PlantGenome genome)
+    internal static PlantGenomeState SerializeGenome(PlantGenome genome)
     {
         if (TryGetGenomeSnapshotInvalidReason(genome, out _))
             return null;
@@ -282,6 +329,7 @@ public static class SimulationSaveSystem
             genus = genome.genus,
             species = genome.species,
             origin = genome.origin,
+            speciesGuid = genome.speciesGuid,
             generation = genome.generation,
             dominantDNA = genome.dominantDNA,
             genusColor = new ColorState
@@ -324,12 +372,7 @@ public static class SimulationSaveSystem
             return true;
         }
 
-        if (string.IsNullOrWhiteSpace(genome.origin) && (string.IsNullOrWhiteSpace(genome.genus) || string.IsNullOrWhiteSpace(genome.species)))
-        {
-            reason = "origin and taxonomy are blank";
-            return true;
-        }
-
+        // Names are optional labels; DNA is what makes a genome restorable
         bool hasMaternal = genome.maternalDNA != null && genome.maternalDNA.Count > 0;
         bool hasPaternal = genome.paternalDNA != null && genome.paternalDNA.Count > 0;
         if (!hasMaternal && !hasPaternal)
@@ -375,14 +418,8 @@ public static class SimulationSaveSystem
 
     private static void WriteSnapshotFile(string path, SimulationSnapshot snapshot)
     {
-        string directory = Path.GetDirectoryName(path);
-        if (!string.IsNullOrEmpty(directory))
-        {
-            Directory.CreateDirectory(directory);
-        }
-
         string json = JsonUtility.ToJson(snapshot, false);
-        File.WriteAllText(path, json);
+        SaveFileUtility.WriteAllTextAtomic(path, json);
     }
 
     private static void PruneAutosavesToLimit(int maxFiles)

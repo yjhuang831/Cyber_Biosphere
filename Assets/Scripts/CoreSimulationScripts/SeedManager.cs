@@ -33,7 +33,16 @@ public class SeedManager : MonoBehaviour
         indexListPool = new ListPool<int>(LIST_POOL_SIZE, 32);
     }
 
-    internal void HourlySeedUpdate()
+    [Header("Cold Preservation")]
+    [Tooltip("Temperature (C) below which cold-preserving seeds start decaying more slowly.")]
+    public float coldPreservationStartTemperature = 5f;
+    [Tooltip("Degrees below the start temperature at which cold preservation reaches full strength.")]
+    [Min(0.01f)] public float coldPreservationFullRange = 20f;
+
+    /// <summary>
+    /// One germination step. TimeController runs a fixed number of these per sim day, evenly spaced.
+    /// </summary>
+    internal void GerminationStep()
     {
         using (var posPooled = GetPooledPositions())
         using (var removePooled = GetPooledIndices())
@@ -51,12 +60,15 @@ public class SeedManager : MonoBehaviour
                     grass = grassManager.activeGrassInstances[tilePos];
                 }
 
+                EnvironmentData data = mapManager.GetTileEnvironmentData(tilePos);
                 List<Seed> seeds = activeSeeds[tilePos];
                 seedsToRemove.Clear();
                 for (int i = 0; i < seeds.Count; i++)
                 {
                     var seed = seeds[i];
-                    if (seed.germinationStage < seed.sproutStage)
+                    // Seeds with a germination cue wait (without spending energy) until the habitat suits the plant they carry
+                    bool cueMet = seed.germinationCue <= 0f || GerminationSuitability(seed.carriedGenome, data) >= seed.germinationCue;
+                    if (seed.germinationStage < seed.sproutStage && cueMet)
                     {
                         // Consume energy to germinate
                         seed.storedEnergy -= seed.germinationEnergy;
@@ -67,35 +79,39 @@ public class SeedManager : MonoBehaviour
                     if (seed.storedEnergy <= 0f)
                     {
                         seedsToRemove.Add(i);
+                        ResearchCounters.Today.seedsExhausted++;
                         continue;
                     }
                     // Create grass instance if ready to sprout
                     if (seed.germinationStage >= seed.sproutStage)
                     {
-                        
+
                         if (grass != null && !grass.IsDormant)
                         {
                             continue;
                         }
 
-                        EnvironmentData data = mapManager.GetTileEnvironmentData(tilePos);
-
                         if (grass != null && grass.grassDensity < 0.6f)
                         {
-                            grassManager.RemoveGrassInstance(tilePos, data);
+                            grassManager.RemoveGrassInstance(tilePos, data, DeathCause.DisplacedBySeedling);
+                            grass = null;
                         }
                         else if (grass != null && grass.grassDensity >= 0.6f)
                         {
                             continue;
                         }
-                        
+
                         seedsToRemove.Add(i);
                         // Germination chance related to energy consumed
                         if (Random.value > seed.germinationEnergy * (float)seed.sproutStage * 0.05f)
                         {
+                            ResearchCounters.Today.seedsFailedToSprout++;
                             continue;
                         }
-                        grassManager.SpawnNewGrass(data, tilePos, seed.carriedGenome, seed.storedEnergy, seed.parentGenus);
+                        grassManager.SpawnNewGrass(data, tilePos, seed.carriedGenome, seed.storedEnergy, seed.parentGenus, BirthCause.Seedling);
+                        ResearchCounters.Today.seedsSprouted++;
+                        // Later seeds on this tile now see the seedling and wait, instead of overwriting it
+                        grass = data.grass;
                     }
                 }
                 for (int j = seedsToRemove.Count - 1; j >= 0; j--)
@@ -122,18 +138,20 @@ public class SeedManager : MonoBehaviour
 
             foreach (var tilePos in activePos)
             {
+                float coldness = Mathf.Clamp01((coldPreservationStartTemperature - mapManager.GetTileEnvironmentData(tilePos).temperature) / coldPreservationFullRange);
                 List<Seed> seeds = activeSeeds[tilePos];
                 seedsToRemove.Clear();
                 for (int i = 0; i < seeds.Count; i++)
                 {
                     var seed = seeds[i];
-                    // Seed decay
-                    seed.storedEnergy -= 1f;
+                    // Seed decay, reduced in the cold for seeds with cold preservation
+                    seed.storedEnergy -= 1f - Mathf.Clamp01(seed.coldPreservation) * coldness;
                     seeds[i] = seed;
                     // Check if energy runs out
                     if (seed.storedEnergy <= 0f)
                     {
                         seedsToRemove.Add(i);
+                        ResearchCounters.Today.seedsDecayed++;
                         continue;
                     }
                 }
@@ -179,6 +197,7 @@ public class SeedManager : MonoBehaviour
                     {
                         seeds.RemoveAt(i);
                         DecrementSeedCount();
+                        ResearchCounters.Today.seedsPruned++;
                     }
                 }
 
@@ -188,6 +207,21 @@ public class SeedManager : MonoBehaviour
                 }
             }
         }
+    }
+
+    /// <summary>
+    /// How well a tile suits the plant a seed carries (0..1): the weaker of its temperature and hydration fit,
+    /// using the same factors as photosynthesis (temperature boost capped at 1).
+    /// </summary>
+    private static float GerminationSuitability(PlantGenome genome, EnvironmentData data)
+    {
+        if (genome == null || data == null)
+            return 0f;
+
+        float hydrationRequirement = Mathf.Max(0.0001f, genome.GetTraitValue(TraitId.HydrationRequirement));
+        float hydrationScore = Mathf.Clamp01(data.hydration / hydrationRequirement);
+        float temperatureScore = Mathf.Clamp01(GrassInstance.TemperatureMultiplier(data.temperature, genome.GetTraitValue(TraitId.TemperatureTolerance)));
+        return Mathf.Min(hydrationScore, temperatureScore);
     }
 
     private PooledList<Vector3Int> GetPooledPositions()

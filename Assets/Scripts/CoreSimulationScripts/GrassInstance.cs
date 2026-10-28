@@ -20,12 +20,18 @@ public class GrassInstance
     internal long dormancyTimer = 0;
     internal int maxDormantTime = 0;
     internal long floweringDays = 0;
-    private float nightEffect = 1f; // Multiplier for growth efficiency during night, based on genome's nightGrowthEfficiency trait
+    internal float nightEffect = 1f; // Multiplier for growth efficiency during night, based on genome's nightGrowthEfficiency trait
     internal ReproductiveState reproductiveState = ReproductiveState.None;
     internal long flowersThisMonth = 0;
     internal long lastFlowerMonth = -1;
     internal bool usedPhotosynthesisLastTick = false;
     internal bool usedRespirationLastTick = false;
+    internal float ageingExposureToday = 0f;   // Sim seconds lived today; dormant time weighted by dormancyEffect
+    internal float dormantTimeToday = 0f;      // Sim seconds spent dormant today
+    internal float daylightPotentialSum = 0f;  // Dormancy measure integrated over today's daylight (sim seconds)
+    internal float daylightSampleTime = 0f;    // Daylight sim seconds sampled today
+    internal long lastCloneDay = -1;       // Sim day of the most recent clone attempt
+    internal int cloneAttemptsToday = 0;   // Clone attempts on lastCloneDay
     
     // [OPTIMIZED] Cached plant type for performance (never changes per genome)
     private string _cachedPlantType;
@@ -80,66 +86,196 @@ public class GrassInstance
     }
 
     /// <summary>
-    /// Static helper that calculates photosynthesis energy for an environment.
-    /// Gets the genome from the environment data's grass instance.
-    /// If competitor is provided, calculates photosynthesis using the competitor's traits instead.
+    /// Inputs and result of the photosynthesis formula for a tile, without side effects.
     /// </summary>
-    private float Photosynthesis(EnvironmentData environmentData)
+    internal struct PhotosynthesisFactors
+    {
+        public float lightEfficiency;       // 1 = enough light; drops (can go negative) with excess light
+        public float hydrationEfficiency;   // 1 = enough water; drops with excess water
+        public float temperatureMultiplier; // 0..1.5, see TemperatureMultiplier
+        public float basePotential;         // 2 × water × temperature, before light and size; compared with DormancyTrigger
+        public float rate;                  // Energy per sim second at the current light and size
+    }
+
+    /// <summary>
+    /// Pure photosynthesis calculation shared by metabolism and the info panel.
+    /// </summary>
+    internal PhotosynthesisFactors CalculatePhotosynthesis(EnvironmentData environmentData)
     {
         // [OPTIMIZED] Cache trait lookups within method scope to reduce repeated calls
-        PlantGenome genome = environmentData.grass.genome;
         float lightRequirement = genome.GetTraitValue(TraitId.LightRequirement);
         float hydrationRequirement = genome.GetTraitValue(TraitId.HydrationRequirement);
         float temperatureTolerance = genome.GetTraitValue(TraitId.TemperatureTolerance);
 
+        PhotosynthesisFactors factors = new PhotosynthesisFactors();
+
         // Calculate photosynthesis based on environment
-        float lightEfficiency = Mathf.Clamp01(environmentData.light / lightRequirement);
-        float hydrationEfficiency = Mathf.Clamp01(environmentData.hydration / hydrationRequirement);
+        factors.lightEfficiency = Mathf.Clamp01(environmentData.light / lightRequirement);
+        factors.hydrationEfficiency = Mathf.Clamp01(environmentData.hydration / hydrationRequirement);
 
         // Penalty for excess light
         if (environmentData.light > lightRequirement + 0.1f)
         {
-            lightEfficiency -= environmentData.light - lightRequirement - 0.1f;
+            factors.lightEfficiency -= environmentData.light - lightRequirement - 0.1f;
         }
-        
+
         // Penalty for excess hydration
         if (environmentData.hydration > hydrationRequirement)
         {
-            hydrationEfficiency -= (environmentData.hydration - hydrationRequirement) / 80f;
+            factors.hydrationEfficiency -= (environmentData.hydration - hydrationRequirement) / 80f;
         }
 
         // Temperature stress affects energy generation
-        float tempDifference = environmentData.temperature - temperatureTolerance;
-        float temperatureMultiplier = 1f;
-        if (tempDifference >= 0f)
+        factors.temperatureMultiplier = TemperatureMultiplier(environmentData.temperature, temperatureTolerance);
+
+        factors.basePotential = 2f * factors.hydrationEfficiency * factors.temperatureMultiplier;
+        factors.rate = factors.basePotential * factors.lightEfficiency * grassDensity;
+        return factors;
+    }
+
+    /// <summary>
+    /// Average dormancy measure (PhotosynthesisFactors.basePotential) over today's daylight so far; -1 if no daylight yet.
+    /// </summary>
+    internal float DaylightPotentialAverage => daylightSampleTime > 0f ? daylightPotentialSum / daylightSampleTime : -1f;
+
+    /// <summary>
+    /// Once per sim day: adds ageing in proportion to the time actually lived (dormant time counts at dormancyEffect,
+    /// a plant born late in the day ages only for its part of the day) and advances the dormancy timer by whole
+    /// dormant days. Clears the day's accumulators.
+    /// </summary>
+    internal void ApplyDailyAgeing(bool plantAging, float agingRate, float dayLengthSimSeconds)
+    {
+        float dayLength = Mathf.Max(0.0001f, dayLengthSimSeconds);
+        if (plantAging)
         {
-            temperatureMultiplier = Mathf.Clamp01(1.5f - (tempDifference / 10f)); // Boost for optimal warmth, but penalize if too hot
-        }
-        else if (tempDifference < 0f)
-        {
-            temperatureMultiplier = Mathf.Clamp01(1f + (tempDifference / 10f)); // Penalize for cold
+            ageEffect += agingRate * Mathf.Clamp01(ageingExposureToday / dayLength);
         }
 
-        float energyGenerated = 2f * hydrationEfficiency * temperatureMultiplier;
+        // The timer counts days spent mostly dormant; it resets when the plant wakes (ExitDormancy)
+        if (dormantTimeToday >= 0.5f * dayLength)
+        {
+            dormancyTimer++;
+        }
+
+        ageingExposureToday = 0f;
+        dormantTimeToday = 0f;
+    }
+
+    /// <summary>
+    /// Daylight average must beat DormancyTrigger by this factor to wake; the gap keeps plants from flipping on the line.
+    /// </summary>
+    internal const float DORMANCY_EXIT_MARGIN = 1.1f;
+
+    /// <summary>
+    /// Once per sim day (GrassManager's daily tick, at dawn): enter or leave dormancy based on the previous day's
+    /// daylight average, then start a new sample. Deciding on a day's average rather than the instant keeps
+    /// dormancy a response to sustained conditions (cold spells, winter) instead of a nightly flicker.
+    /// </summary>
+    internal void DailyDormancyDecision()
+    {
+        float average = DaylightPotentialAverage;
+        daylightPotentialSum = 0f;
+        daylightSampleTime = 0f;
 
         float dormancyTrigger = genome.GetTraitValue(TraitId.DormancyTrigger);
-        if (dormancyTrigger > 0.0001f && !IsDormant && energyGenerated < dormancyTrigger && grassDensity >= maturityThreshold)
+        if (average < 0f || dormancyTrigger <= 0.0001f)
+            return; // No daylight sampled (e.g. born after dusk), or no dormancy gene
+
+        if (!IsDormant && average < dormancyTrigger && grassDensity >= maturityThreshold)
         {
-            float dormancyRate = genome.GetTraitValue(TraitId.DormancyRate);
-            EnterDormancy(dormancyRate);
+            EnterDormancy(genome.GetTraitValue(TraitId.DormancyRate));
+        }
+        else if (IsDormant && average > dormancyTrigger * DORMANCY_EXIT_MARGIN)
+        {
+            ExitDormancy();
+        }
+    }
+
+    /// <summary>
+    /// Energy gained per sim second by respiration (it burns tile oxygen), without side effects.
+    /// </summary>
+    internal float CalculateRespirationRate(EnvironmentData environmentData)
+    {
+        return grassDensity * environmentData.oxygen * genome.GetTraitValue(TraitId.RespirationRate) * 0.05f * dormancyEffect;
+    }
+
+    /// <summary>
+    /// Per-sim-second energy flows at the plant's current state, mirroring PerformMetabolism without changing anything.
+    /// Gains and costs are both positive numbers.
+    /// </summary>
+    internal struct EnergyBudget
+    {
+        public bool photosynthesisOn;
+        public bool respirationOn;
+        public float photosynthesis;
+        public float respiration;
+        public float geneUpkeep;
+        public float ageing;
+        public float growth;
+        public float seedProvisioning;
+        public float Gains => photosynthesis + respiration;
+        public float Costs => geneUpkeep + ageing + growth + seedProvisioning;
+        public float Net => Gains - Costs;
+    }
+
+    internal EnergyBudget EstimateEnergyBudget(EnvironmentData eData, float metabolismCostPerAllele, float baseGrowthCost)
+    {
+        EnergyBudget budget = new EnergyBudget();
+
+        if (energyStored < 100f && !IsDormant)
+        {
+            if (eData.light > 0.01f)
+            {
+                budget.photosynthesisOn = true;
+                budget.photosynthesis = CalculatePhotosynthesis(eData).rate;
+            }
+            else if (energyStored < genome.GetTraitValue(TraitId.RespirationTrigger))
+            {
+                budget.respirationOn = true;
+                budget.respiration = CalculateRespirationRate(eData);
+            }
         }
 
-        energyGenerated *= lightEfficiency;
-        energyGenerated *= environmentData.grass.grassDensity;
+        float costScale = dormancyEffect * nightEffect * grassDensity;
+        budget.geneUpkeep = metabolismCostPerAllele * genome.GetDominantDNALocusCount() * costScale;
+        budget.ageing = ageEffect * costScale;
 
-        return energyGenerated;
+        float growthExpense = baseGrowthCost * grassDensity * nightEffect;
+        if (grassDensity < 1f)
+        {
+            growthExpense += 0.1f * Mathf.Cos(grassDensity * Mathf.PI) + 0.1f;
+        }
+        float seedingProportion = genome.GetTraitValue(TraitId.SeedingProportion);
+        if (!IsDormant && grassDensity < 1f)
+        {
+            budget.growth = IsSeeding ? growthExpense * (1 - seedingProportion) : growthExpense;
+        }
+        if (!IsDormant && IsSeeding)
+        {
+            budget.seedProvisioning = growthExpense * seedingProportion;
+        }
+
+        return budget;
+    }
+
+    /// <summary>
+    /// Photosynthesis temperature factor: up to 1.5x boost at the tolerance point, declining when hotter, penalized when colder.
+    /// Shared with seed germination checks and the info panel so they stay consistent.
+    /// </summary>
+    internal static float TemperatureMultiplier(float temperature, float temperatureTolerance)
+    {
+        float tempDifference = temperature - temperatureTolerance;
+        if (tempDifference >= 0f)
+        {
+            return Mathf.Clamp(1.5f - (tempDifference / 10f), 0f, 1.5f); // Boost for optimal warmth, but penalize if too hot
+        }
+        return Mathf.Clamp01(1f + (tempDifference / 10f)); // Penalize for cold
     }
 
     private float Respiration(EnvironmentData environmentData, float time)
     {
-        PlantGenome genome = environmentData.grass.genome;
         float energyGenerated = 0f;
-        float oxygenConsumption = environmentData.grass.grassDensity * environmentData.oxygen * genome.GetTraitValue(TraitId.RespirationRate) * 0.05f * dormancyEffect; // Base oxygen consumption for respiration
+        float oxygenConsumption = CalculateRespirationRate(environmentData); // Base oxygen consumption for respiration
 
         energyGenerated += oxygenConsumption;
         environmentData.oxygen -= oxygenConsumption * time; // Reduce oxygen based on consumption and time
@@ -173,11 +309,29 @@ public class GrassInstance
             nightEffect = 1f; // Reset night effect during day
         }
 
+        // Time-based daily accounting, settled by ApplyDailyAgeing: what matters is how long the plant actually
+        // spent dormant, not its state at the instant the day rolls over
+        ageingExposureToday += IsDormant ? time * dormancyEffect : time;
+        if (IsDormant)
+        {
+            dormantTimeToday += time;
+        }
+
+        bool isDaylight = eData.light > 0.01f;
+        PhotosynthesisFactors factors = default;
+        if (isDaylight)
+        {
+            // Sampled whether dormant or not; DailyDormancyDecision averages it over the day's daylight
+            factors = CalculatePhotosynthesis(eData);
+            daylightPotentialSum += factors.basePotential * time;
+            daylightSampleTime += time;
+        }
+
         if (energyStored < 100f && !IsDormant)
         {
-            if (eData.light > 0.01f)
+            if (isDaylight)
             {
-                energyGain += Photosynthesis(eData);
+                energyGain += factors.rate;
                 usedPhotosynthesisLastTick = true;
                 if (eData.oxygen < 100f)
                 {
@@ -193,10 +347,6 @@ public class GrassInstance
             }
 
             energyStored += energyGain * time;
-        }
-        else if (IsDormant)
-        {
-            DormancyRecover(eData);
         }
 
         // [OPTIMIZED] Compute metabolism cost inline to avoid method call overhead
@@ -268,6 +418,20 @@ public class GrassInstance
     }
 
     /// <summary>
+    /// Why IsAlive() returned false (checked in the same order).
+    /// </summary>
+    internal DeathCause GetDeathCause()
+    {
+        if (dormancyTimer > maxDormantTime)
+            return DeathCause.DormancyTimeout;
+        if (energyStored < 0.05f)
+            return DeathCause.Starvation;
+        if (grassDensity < 0.001f)
+            return DeathCause.Withered;
+        return DeathCause.Other;
+    }
+
+    /// <summary>
     /// Checks if this grass instance is ready to reproduce.
     /// If conditions are met (mature and energy sufficient), deducts reproduction cost and returns true.
     /// Returns false if grass is not mature enough or lacks sufficient energy.
@@ -312,20 +476,10 @@ public class GrassInstance
             return;
     }
 
-    private void DormancyRecover(EnvironmentData data)
-    {
-        float potentialEnergy = Photosynthesis(data);
-
-        float dormancyTrigger = genome.GetTraitValue(TraitId.DormancyTrigger);
-        if (potentialEnergy > dormancyTrigger && dormancyTrigger > 0.0001f)
-        {
-            ExitDormancy();
-        }
-    }
-
     internal void EnterDormancy(float dormancyRate)
     {
         dormancyState = DormancyState.Dormant;
+        ResearchCounters.Today.dormancyEntries++;
         if (reproductiveState == ReproductiveState.Flowering)
         {
             reproductiveState = ReproductiveState.None;
@@ -336,6 +490,7 @@ public class GrassInstance
     internal void ExitDormancy()
     {
         dormancyState = DormancyState.Active;
+        ResearchCounters.Today.dormancyExits++;
         dormancyEffect = 1f;
         dormancyTimer = 0;
     }
