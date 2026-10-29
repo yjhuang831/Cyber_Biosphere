@@ -84,6 +84,8 @@ public class MapManager : MonoBehaviour
         if (!isInitialized)
         {
             InitializeMap();
+            // A fresh map (not a load, which brings its own atmosphere) starts at the reference CO2 level
+            environmentManager.ResetAtmosphereForNewMap();
         }
     }
 

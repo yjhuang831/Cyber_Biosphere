@@ -152,6 +152,7 @@ public static class SimulationSaveSystem
                 oxygen = env.oxygen,
                 soilOrganicCarbon = env.soilOrganicCarbon,
                 dissolvedCarbon = env.dissolvedCarbon,
+                litterCarbon = env.litterCarbon,
                 availableNitrogen = env.availableNitrogen,
                 availablePhosphorus = env.availablePhosphorus,
                 availablePotassium = env.availablePotassium
@@ -277,6 +278,7 @@ public static class SimulationSaveSystem
             genomeIndex = genomeIndex,
             seedGenomeIndex = seedGenomeIndex,
             nightEffect = grass.nightEffect,
+            carbon = grass.carbon,
             lastCloneDay = grass.lastCloneDay,
             cloneAttemptsToday = grass.cloneAttemptsToday,
             ageingExposureToday = grass.ageingExposureToday,

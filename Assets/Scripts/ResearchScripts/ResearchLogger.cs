@@ -176,6 +176,7 @@ internal class ResearchLogger
             season = seasonManager != null ? seasonManager.CurrentSeason : -1,
             seasonalTemperatureOffset = environmentManager.seasonalTemperatureOffset,
             atmosphericCarbon = environmentManager.atmosphericCarbon,
+            co2PhotosynthesisFactor = environmentManager.GetCO2PhotosynthesisFactor(),
             events = events,
             lineages = new List<LineageCount>()
         };
@@ -183,12 +184,13 @@ internal class ResearchLogger
         AddPlantStats(summary);
         AddSeedStats(summary);
         AddEnvironmentStats(summary);
+        summary.totalCarbon = summary.atmosphericCarbon + summary.plantCarbon + summary.litterCarbon + summary.soilCarbon + summary.dissolvedCarbon;
         return summary;
     }
 
     private void AddPlantStats(DailySummary summary)
     {
-        double energy = 0, density = 0, age = 0, generation = 0, loci = 0;
+        double energy = 0, density = 0, age = 0, generation = 0, loci = 0, capacity = 0;
         Dictionary<string, LineageCount> lineages = new Dictionary<string, LineageCount>();
 
         foreach (GrassInstance grass in grassManager.activeGrassInstances.Values)
@@ -203,6 +205,8 @@ internal class ResearchLogger
                 summary.plantsInWater++;
 
             energy += grass.energyStored;
+            capacity += grass.EnergyCapacity;
+            summary.plantCarbon += grass.carbon;
             density += grass.grassDensity;
             age += grass.age;
             generation += grass.genome.generation;
@@ -228,6 +232,7 @@ internal class ResearchLogger
         if (summary.plants > 0)
         {
             summary.meanEnergy = (float)(energy / summary.plants);
+            summary.meanEnergyCapacity = (float)(capacity / summary.plants);
             summary.meanDensity = (float)(density / summary.plants);
             summary.meanAgeDays = (float)(age / summary.plants);
             summary.meanGeneration = (float)(generation / summary.plants);
@@ -280,6 +285,9 @@ internal class ResearchLogger
         foreach (Vector3Int pos in mapManager.GetAllTilePositions())
         {
             EnvironmentData data = mapManager.GetTileEnvironmentData(pos);
+            summary.soilCarbon += data.soilOrganicCarbon;
+            summary.dissolvedCarbon += data.dissolvedCarbon;
+            summary.litterCarbon += data.litterCarbon;
             if (data.isWater)
             {
                 summary.waterTiles++;
@@ -497,7 +505,16 @@ internal class DailySummary
     public float waterMeanNitrogen;
     public float waterMeanPhosphorus;
     public float waterMeanPotassium;
-    public float atmosphericCarbon;
+
+    // Carbon budget (map totals). totalCarbon should only change when the map is reseeded; drift means a bug.
+    public double atmosphericCarbon;
+    public double plantCarbon;
+    public double litterCarbon;
+    public double soilCarbon;
+    public double dissolvedCarbon;
+    public double totalCarbon;
+    public float co2PhotosynthesisFactor;
+    public float meanEnergyCapacity;
 
     public DailyEventCounts events;
 }

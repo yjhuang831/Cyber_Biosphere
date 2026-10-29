@@ -96,7 +96,13 @@ Behavior:
   - Phase 2: rebuild map size/topology, restore environment settings (tile-level values are recalculated from them),
     plants, seeds, counters, time state, and the selected season.
 
-- Schema version is now `8` (schemas `6` and `7` remain loadable and are migrated in memory on load):
+- Schema `9` (current): carbon cycle.
+  - Per-tile carbon/nutrient pools and `atmosphericCarbon` are doubles; tiles add `litterCarbon` (decay pool).
+  - Plants save `carbon` (biomass).
+  - Loading schema < 9: plants start with 0 biomass carbon (refilled by photosynthesis), and the atmosphere is topped
+    up to `referenceAtmosphericCarbonPerTile` per tile if lower, because CO2 now drives photosynthesis.
+
+- Schema `8` (schemas `6` and `7` remain loadable and are migrated in memory on load):
   - Tiles hold environment only. Plants (`plants`) and seeds (`seeds`) are separate lists keyed by tile coordinates.
   - Every genome is stored once in `genomes` and referenced by index (`-1` = none); seeds from one parent share one entry.
   - Genomes carry `speciesGuid`, the library species identity (see Species Library below).
@@ -123,4 +129,4 @@ Behavior:
   - No longer stores genome `phenotypes`; phenotypes are rebuilt from DNA on load.
   - Replaces genome `cachedDNAComposition` with compact `dominantDNA` strand indicator (`0 = M`, `1 = P`).
   - Adds map-level soil organic carbon and available N/P/K pools plus the atmospheric carbon reservoir.
-  - Loader supports schemas `6` to `8`; older schemas are rejected.
+  - Loader supports schemas `6` to `9`; older schemas are rejected.

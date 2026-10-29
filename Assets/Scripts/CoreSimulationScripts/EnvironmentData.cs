@@ -11,19 +11,21 @@ public class EnvironmentData
     public float oxygen;
     public bool isWater;
 
-    // Map-level biogeochemical pools. These are not consumed by grass yet.
-    public float soilOrganicCarbon;
-    public float dissolvedCarbon;
-    public float availableNitrogen;
-    public float availablePhosphorus;
-    public float availablePotassium;
+    // Biogeochemical pools. Double precision: they receive tiny increments (~1e-5) on values of 10-100,
+    // which float would round away. Carbon cycles through plants; N/P/K are not consumed by grass yet.
+    public double soilOrganicCarbon;
+    public double dissolvedCarbon;
+    public double litterCarbon;     // Decay pool: carbon from dead/shrinking plants, slowly released into soilOrganicCarbon
+    public double availableNitrogen;
+    public double availablePhosphorus;
+    public double availablePotassium;
 
     // Scratch values used to apply diffusion from a stable oxygen snapshot.
     [System.NonSerialized] public float oxygenBeforeDiffusion;
     [System.NonSerialized] public float oxygenDiffusionDelta;
-    [System.NonSerialized] public float nitrogenTransportDelta;
-    [System.NonSerialized] public float phosphorusTransportDelta;
-    [System.NonSerialized] public float potassiumTransportDelta;
+    [System.NonSerialized] public double nitrogenTransportDelta;
+    [System.NonSerialized] public double phosphorusTransportDelta;
+    [System.NonSerialized] public double potassiumTransportDelta;
 
     public GrassInstance grass; // Grass on this tile (includes genetics, energy, and instance state)
 

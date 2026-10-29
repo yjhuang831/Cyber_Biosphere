@@ -299,14 +299,27 @@ public static class SimulationLoadSystem
                 env.oxygen = tileState.oxygen;
                 if (snapshot.schemaVersion >= 7)
                 {
-                    env.soilOrganicCarbon = Mathf.Max(0f, tileState.soilOrganicCarbon);
-                    env.dissolvedCarbon = Mathf.Max(0f, tileState.dissolvedCarbon);
-                    env.availableNitrogen = Mathf.Max(0f, tileState.availableNitrogen);
-                    env.availablePhosphorus = Mathf.Max(0f, tileState.availablePhosphorus);
-                    env.availablePotassium = Mathf.Max(0f, tileState.availablePotassium);
+                    env.soilOrganicCarbon = Math.Max(0.0, tileState.soilOrganicCarbon);
+                    env.dissolvedCarbon = Math.Max(0.0, tileState.dissolvedCarbon);
+                    env.availableNitrogen = Math.Max(0.0, tileState.availableNitrogen);
+                    env.availablePhosphorus = Math.Max(0.0, tileState.availablePhosphorus);
+                    env.availablePotassium = Math.Max(0.0, tileState.availablePotassium);
+                }
+                if (snapshot.schemaVersion >= 9)
+                {
+                    env.litterCarbon = Math.Max(0.0, tileState.litterCarbon);
                 }
             }
             env.grass = null;
+        }
+
+        // Before schema 9 the atmosphere started empty and had no effect; now CO2 drives photosynthesis,
+        // so top old saves up to the reference level rather than starving every plant.
+        if (snapshot.schemaVersion < 9 && environmentManager.AtmosphericCarbonPerTile < environmentManager.referenceAtmosphericCarbonPerTile)
+        {
+            double before = environmentManager.atmosphericCarbon;
+            environmentManager.ResetAtmosphereForNewMap();
+            Debug.Log("Legacy save: atmospheric carbon raised from " + before.ToString("F1") + " to " + environmentManager.atmosphericCarbon.ToString("F1") + " (CO2 now affects photosynthesis).");
         }
 
         // Plants
@@ -423,7 +436,7 @@ public static class SimulationLoadSystem
         target.baseLightLevel = source.baseLightLevel;
         target.waterMaxLightLevel = source.waterMaxLightLevel;
         target.landMaxLightLevel = source.landMaxLightLevel;
-        target.atmosphericCarbon = Mathf.Max(0f, source.atmosphericCarbon);
+        target.atmosphericCarbon = Math.Max(0.0, source.atmosphericCarbon);
     }
 
     private static void ApplyGrassSettings(GrassSettingsState source, GrassManager target, SeedManager seedTarget)
@@ -479,6 +492,7 @@ public static class SimulationLoadSystem
         grass.maturityThreshold = source.maturityThreshold;
         grass.seedingEnergy = source.seedingEnergy;
         grass.nightEffect = source.nightEffect > 0f ? source.nightEffect : 1f;
+        grass.carbon = Mathf.Max(0f, source.carbon); // 0 for pre-schema-9 saves; refilled by photosynthesis
         grass.lastCloneDay = source.lastCloneDay;
         grass.cloneAttemptsToday = Mathf.Max(0, source.cloneAttemptsToday);
         grass.ageingExposureToday = Mathf.Max(0f, source.ageingExposureToday);

@@ -32,6 +32,37 @@ public class GrassInstance
     internal float daylightSampleTime = 0f;    // Daylight sim seconds sampled today
     internal long lastCloneDay = -1;       // Sim day of the most recent clone attempt
     internal int cloneAttemptsToday = 0;   // Clone attempts on lastCloneDay
+    internal float carbon = 0f;            // Biomass carbon (map carbon units); fixed from / respired to the atmosphere
+
+    // ---- Energy storage, scaled by size ----
+    internal const float MAX_ENERGY_CAPACITY = 100f;        // Capacity at full size; energy thresholds (traits) are written against this
+    internal const float MIN_ENERGY_CAPACITY_FRACTION = 0.25f; // Seedlings can still hold a clone's starting energy (SpreadCost <= 25)
+
+    /// <summary>
+    /// Energy the plant can bank at its current size: 25 at size 0, 100 at full size. Photosynthesis and respiration
+    /// stop adding energy at this level. Energy already above it (seed reserves, or a plant that shrank) is kept and spent down.
+    /// </summary>
+    internal float EnergyCapacity => MAX_ENERGY_CAPACITY * (MIN_ENERGY_CAPACITY_FRACTION + (1f - MIN_ENERGY_CAPACITY_FRACTION) * grassDensity);
+
+    /// <summary>
+    /// Scales an energy threshold trait (defined on the full-size 0-100 scale) to the plant's current capacity,
+    /// so a smaller plant needs proportionally less. Identical to the raw trait value at full size.
+    /// </summary>
+    internal float ScaledEnergyThreshold(float traitThreshold)
+    {
+        return traitThreshold * EnergyCapacity / MAX_ENERGY_CAPACITY;
+    }
+
+    /// <summary>
+    /// Settings for a plant's carbon exchange with the atmosphere, supplied by GrassManager each update.
+    /// </summary>
+    internal struct PlantCarbonContext
+    {
+        public EnvironmentManager environment; // Atmosphere and decay pool (null disables carbon accounting)
+        public float co2Factor;                // Photosynthesis multiplier from atmospheric CO2
+        public float carbonPerEnergy;          // Carbon fixed per unit of photosynthesis energy, and released per unit respired
+        public float carbonPerSize;            // Biomass carbon a plant can hold at full size; scales with size
+    }
     
     // [OPTIMIZED] Cached plant type for performance (never changes per genome)
     private string _cachedPlantType;
@@ -93,14 +124,15 @@ public class GrassInstance
         public float lightEfficiency;       // 1 = enough light; drops (can go negative) with excess light
         public float hydrationEfficiency;   // 1 = enough water; drops with excess water
         public float temperatureMultiplier; // 0..1.5, see TemperatureMultiplier
-        public float basePotential;         // 2 × water × temperature, before light and size; compared with DormancyTrigger
-        public float rate;                  // Energy per sim second at the current light and size
+        public float basePotential;         // 2 × water × temperature, before light, CO2 and size; compared with DormancyTrigger
+        public float co2Multiplier;         // From atmospheric CO2 (1 at the reference level)
+        public float rate;                  // Energy per sim second at the current light, CO2 and size
     }
 
     /// <summary>
     /// Pure photosynthesis calculation shared by metabolism and the info panel.
     /// </summary>
-    internal PhotosynthesisFactors CalculatePhotosynthesis(EnvironmentData environmentData)
+    internal PhotosynthesisFactors CalculatePhotosynthesis(EnvironmentData environmentData, float co2Factor = 1f)
     {
         // [OPTIMIZED] Cache trait lookups within method scope to reduce repeated calls
         float lightRequirement = genome.GetTraitValue(TraitId.LightRequirement);
@@ -129,7 +161,8 @@ public class GrassInstance
         factors.temperatureMultiplier = TemperatureMultiplier(environmentData.temperature, temperatureTolerance);
 
         factors.basePotential = 2f * factors.hydrationEfficiency * factors.temperatureMultiplier;
-        factors.rate = factors.basePotential * factors.lightEfficiency * grassDensity;
+        factors.co2Multiplier = co2Factor;
+        factors.rate = factors.basePotential * factors.lightEfficiency * co2Factor * grassDensity;
         return factors;
     }
 
@@ -218,18 +251,18 @@ public class GrassInstance
         public float Net => Gains - Costs;
     }
 
-    internal EnergyBudget EstimateEnergyBudget(EnvironmentData eData, float metabolismCostPerAllele, float baseGrowthCost)
+    internal EnergyBudget EstimateEnergyBudget(EnvironmentData eData, float metabolismCostPerAllele, float baseGrowthCost, float co2Factor = 1f)
     {
         EnergyBudget budget = new EnergyBudget();
 
-        if (energyStored < 100f && !IsDormant)
+        if (energyStored < EnergyCapacity && !IsDormant)
         {
             if (eData.light > 0.01f)
             {
                 budget.photosynthesisOn = true;
-                budget.photosynthesis = CalculatePhotosynthesis(eData).rate;
+                budget.photosynthesis = CalculatePhotosynthesis(eData, co2Factor).rate;
             }
-            else if (energyStored < genome.GetTraitValue(TraitId.RespirationTrigger))
+            else if (energyStored < ScaledEnergyThreshold(genome.GetTraitValue(TraitId.RespirationTrigger)))
             {
                 budget.respirationOn = true;
                 budget.respiration = CalculateRespirationRate(eData);
@@ -258,18 +291,20 @@ public class GrassInstance
         return budget;
     }
 
+    internal const float TEMPERATURE_PEAK_MULTIPLIER = 1.5f; // Photosynthesis boost at exactly the ideal temperature
+    internal const float HEAT_FALLOFF_PER_DEGREE = 0.1f;     // Lost per degree above ideal (reaches 0 at +15 C)
+    internal const float COLD_FALLOFF_PER_DEGREE = 0.1f;     // Lost per degree below ideal (reaches 0 at -15 C)
+
     /// <summary>
-    /// Photosynthesis temperature factor: up to 1.5x boost at the tolerance point, declining when hotter, penalized when colder.
-    /// Shared with seed germination checks and the info panel so they stay consistent.
+    /// Photosynthesis temperature factor: a continuous peak of 1.5x at the plant's ideal temperature (TemperatureTolerance),
+    /// falling off linearly on both sides; still above 1x within 5 C of ideal. The slopes are separate so the curve
+    /// can be made asymmetric. Shared with seed germination checks and the info panel so they stay consistent.
     /// </summary>
     internal static float TemperatureMultiplier(float temperature, float temperatureTolerance)
     {
         float tempDifference = temperature - temperatureTolerance;
-        if (tempDifference >= 0f)
-        {
-            return Mathf.Clamp(1.5f - (tempDifference / 10f), 0f, 1.5f); // Boost for optimal warmth, but penalize if too hot
-        }
-        return Mathf.Clamp01(1f + (tempDifference / 10f)); // Penalize for cold
+        float falloffPerDegree = tempDifference >= 0f ? HEAT_FALLOFF_PER_DEGREE : COLD_FALLOFF_PER_DEGREE;
+        return Mathf.Clamp(TEMPERATURE_PEAK_MULTIPLIER - Mathf.Abs(tempDifference) * falloffPerDegree, 0f, TEMPERATURE_PEAK_MULTIPLIER);
     }
 
     private float Respiration(EnvironmentData environmentData, float time)
@@ -285,10 +320,10 @@ public class GrassInstance
     }
 
     /// <summary>
-    /// Performs all metabolic calculations for the grass: energy decay, photosynthesis, and density updates.
-    /// Returns the amount of oxygen generated.
+    /// Performs all metabolic calculations for the grass: energy gains and costs, density updates, and carbon exchange
+    /// (photosynthesis fixes atmospheric CO2 into biomass; respiration releases it).
     /// </summary>
-    public void PerformMetabolism(EnvironmentData eData, float metabolismCostPerAllele, float time, float baseGrowthCost, bool isNight)
+    internal void PerformMetabolism(EnvironmentData eData, float metabolismCostPerAllele, float time, float baseGrowthCost, bool isNight, PlantCarbonContext carbonContext)
     {
         float energyGain = 0f;
         usedPhotosynthesisLastTick = false;
@@ -322,12 +357,14 @@ public class GrassInstance
         if (isDaylight)
         {
             // Sampled whether dormant or not; DailyDormancyDecision averages it over the day's daylight
-            factors = CalculatePhotosynthesis(eData);
+            factors = CalculatePhotosynthesis(eData, carbonContext.co2Factor);
             daylightPotentialSum += factors.basePotential * time;
             daylightSampleTime += time;
         }
 
-        if (energyStored < 100f && !IsDormant)
+        float photosynthesisEnergy = 0f;
+        float respirationEnergy = 0f;
+        if (energyStored < EnergyCapacity && !IsDormant)
         {
             if (isDaylight)
             {
@@ -340,18 +377,27 @@ public class GrassInstance
                 }
             }
             // [OPTIMIZED] Use cached respirationTrigger instead of repeated GetTraitValue() call
-            else if (energyStored < respirationTrigger)
+            else if (energyStored < ScaledEnergyThreshold(respirationTrigger))
             {
                 energyGain += Respiration(eData, time);
                 usedRespirationLastTick = true;
             }
 
-            energyStored += energyGain * time;
+            // Gains stop at the size-scaled capacity; energy already above it (seed reserves) is not taken away
+            float added = Mathf.Min(energyGain * time, EnergyCapacity - energyStored);
+            energyStored += added;
+            if (usedPhotosynthesisLastTick)
+                photosynthesisEnergy = added;
+            else
+                respirationEnergy = added;
         }
 
         // [OPTIMIZED] Compute metabolism cost inline to avoid method call overhead
         float actualMetabolismCost = (metabolismCostPerAllele * genome.GetDominantDNALocusCount() + ageEffect) * dormancyEffect * nightEffect;
-        energyStored -= actualMetabolismCost * grassDensity * time;
+        float maintenanceEnergy = actualMetabolismCost * grassDensity * time;
+        energyStored -= maintenanceEnergy;
+
+        ExchangeCarbon(carbonContext, photosynthesisEnergy, maintenanceEnergy + respirationEnergy);
 
         // [OPTIMIZED] Compute growth expense inline
         float growthExpense = baseGrowthCost * grassDensity * nightEffect * time;
@@ -400,9 +446,51 @@ public class GrassInstance
             grassDensity -= 0.01f * time; // Wilting rate
             grassDensity = Mathf.Clamp01(grassDensity);
             energyStored = 5f;
+            ShedExcessCarbon(carbonContext, eData);
         }
-        // Clamp energy to valid range
-        energyStored = Mathf.Clamp(energyStored, 0f, 100f);
+        // Gains are capped at capacity above, so only the floor needs clamping here
+        energyStored = Mathf.Max(energyStored, 0f);
+    }
+
+    /// <summary>
+    /// Photosynthesis fixes atmospheric CO2 into biomass, up to what the plant's size can hold (and what the atmosphere
+    /// has). Respiration - maintenance (gene upkeep, ageing) and night oxygen respiration - burns biomass back to CO2.
+    /// Carbon only moves between pools, so the map total is conserved.
+    /// </summary>
+    private void ExchangeCarbon(PlantCarbonContext context, float photosynthesisEnergy, float respiredEnergy)
+    {
+        if (context.environment == null)
+            return;
+
+        float carbonCapacity = context.carbonPerSize * grassDensity;
+        if (photosynthesisEnergy > 0f && carbon < carbonCapacity)
+        {
+            double wanted = System.Math.Min(photosynthesisEnergy * context.carbonPerEnergy, carbonCapacity - carbon);
+            carbon += (float)context.environment.TakeAtmosphericCarbon(wanted);
+        }
+
+        float released = Mathf.Min(carbon, Mathf.Max(0f, respiredEnergy) * context.carbonPerEnergy);
+        if (released > 0f)
+        {
+            carbon -= released;
+            context.environment.ReleaseAtmosphericCarbon(released);
+        }
+    }
+
+    /// <summary>
+    /// A shrinking plant sheds biomass it can no longer hold into its tile's decay pool.
+    /// </summary>
+    private void ShedExcessCarbon(PlantCarbonContext context, EnvironmentData tile)
+    {
+        if (context.environment == null)
+            return;
+
+        float excess = carbon - context.carbonPerSize * grassDensity;
+        if (excess > 0f)
+        {
+            carbon -= excess;
+            context.environment.AddLitter(tile, excess);
+        }
     }
 
     /// <summary>
@@ -448,8 +536,8 @@ public class GrassInstance
             return false;
         }
 
-        // Check energy threshold
-        if (energyStored < genome.GetTraitValue(TraitId.ReproductionEnergyThreshold))
+        // Check energy threshold (scaled to capacity; equals the trait value at full size, which cloning requires)
+        if (energyStored < ScaledEnergyThreshold(genome.GetTraitValue(TraitId.ReproductionEnergyThreshold)))
             return false;
 
         return true;
@@ -463,8 +551,8 @@ public class GrassInstance
         // Check maturity
         if (grassDensity < genome.GetTraitValue(TraitId.MaturityThreshold))
             return false;
-        // Check flowering threshold
-        if (energyStored < genome.GetTraitValue(TraitId.FloweringEnergyThreshold))
+        // Check flowering threshold (scaled to capacity, so a plant flowering below full size needs proportionally less)
+        if (energyStored < ScaledEnergyThreshold(genome.GetTraitValue(TraitId.FloweringEnergyThreshold)))
             return false;
         
         return true;

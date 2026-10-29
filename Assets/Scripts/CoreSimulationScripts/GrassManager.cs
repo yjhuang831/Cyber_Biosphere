@@ -20,6 +20,13 @@ public class GrassManager : MonoBehaviour
     [Tooltip("Clone attempts each plant may make per sim day. 0 = unlimited (one attempt per plant update, the original behaviour).")]
     [Min(0)] public int maxCloneAttemptsPerDay = 0;
 
+    [Header("Plant Carbon")]
+    [Tooltip("Carbon fixed per unit of photosynthesis energy, and released per unit of energy respired (upkeep, ageing, night respiration).")]
+    [Min(0f)] public float carbonPerEnergy = 0.01f;
+    [Tooltip("Biomass carbon a plant holds at full size (scales with size). Compare referenceAtmosphericCarbonPerTile on EnvironmentManager: " +
+             "a fully vegetated map locks up about this much per tile.")]
+    [Min(0f)] public float carbonPerSize = 10f;
+
     // Collection of active grass instances for individual updates
     internal Dictionary<Vector3Int, GrassInstance> activeGrassInstances = new Dictionary<Vector3Int, GrassInstance>();
     
@@ -37,6 +44,15 @@ public class GrassManager : MonoBehaviour
 
     internal void UpdateAllGrassInstances(float simTime)
     {
+        // CO2 is sampled once per update so every plant sees the same level; the atmosphere still limits actual uptake
+        GrassInstance.PlantCarbonContext carbonContext = new GrassInstance.PlantCarbonContext
+        {
+            environment = environmentManager,
+            co2Factor = environmentManager != null ? environmentManager.GetCO2PhotosynthesisFactor() : 1f,
+            carbonPerEnergy = carbonPerEnergy,
+            carbonPerSize = carbonPerSize
+        };
+
         using (var pooled = GetPooledPositions())
         {
             List<Vector3Int> activePositions = pooled.List;
@@ -69,7 +85,7 @@ public class GrassManager : MonoBehaviour
                     grassInstance.DailyDormancyDecision();
                 }
 
-                grassInstance.PerformMetabolism(data, metabolismCostPerAllele, simTime, baseGrowthCost, TimeController.isNight);
+                grassInstance.PerformMetabolism(data, metabolismCostPerAllele, simTime, baseGrowthCost, TimeController.isNight, carbonContext);
 
                 // Check if grass should reproduce (handles energy deduction internally)
                 if (!grassInstance.IsDormant && grassInstance.CheckAndHandleSpread() && TryUseCloneAttempt(grassInstance))
@@ -181,10 +197,22 @@ public class GrassManager : MonoBehaviour
         }
     }
 
+    /// <summary>
+    /// A dead plant's biomass carbon goes into its tile's decay pool (see EnvironmentManager.litterDecayRate).
+    /// </summary>
+    private void ReturnCarbonToLitter(GrassInstance grass, EnvironmentData tile)
+    {
+        if (grass == null || grass.carbon <= 0f || environmentManager == null)
+            return;
+        environmentManager.AddLitter(tile, grass.carbon);
+        grass.carbon = 0f;
+    }
+
     internal void SpawnNewGrass(EnvironmentData targetData, Vector3Int gridposition, PlantGenome genome = null, float iniEnergy = 0f, string parentGenus = null, BirthCause cause = BirthCause.Player)
     {
         ResearchCounters.RecordBirth(cause);
         bool hadGrass = targetData.grass != null;
+        ReturnCarbonToLitter(targetData.grass, targetData); // Should not happen (callers spawn on empty tiles), but never lose carbon
         PlantGenome newGenome = null;
         bool isSavedSpecies = false;
         
@@ -397,6 +425,7 @@ public class GrassManager : MonoBehaviour
         if (data.grass != null)
         {
             ResearchCounters.RecordDeath(cause);
+            ReturnCarbonToLitter(data.grass, data);
             data.grass.Die(); // Handle any cleanup in the GrassInstance itself
             if (plantCount > 0)
             {

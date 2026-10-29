@@ -308,8 +308,8 @@ MonoBehaviour:
   m_faceColor:
     serializedVersion: 2
     rgba: 4294967295
-  m_fontSize: 32
-  m_fontSizeBase: 32
+  m_fontSize: 28
+  m_fontSizeBase: 28
   m_fontWeight: 400
   m_enableAutoSizing: 0
   m_fontSizeMin: 18
@@ -321,7 +321,7 @@ MonoBehaviour:
   m_characterSpacing: 0
   m_characterHorizontalScale: 1
   m_wordSpacing: 0
-  m_lineSpacing: 0
+  m_lineSpacing: 25
   m_lineSpacingMax: 0
   m_paragraphSpacing: 0
   m_charWidthMaxAdj: 0
@@ -8820,6 +8820,7 @@ MonoBehaviour:
   agingRate: 0.1
   baseGrowthCost: 0.5
   flowerLimit: 1
+  maxCloneAttemptsPerDay: 0
 --- !u!114 &876398465
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -17909,6 +17910,8 @@ MonoBehaviour:
   maxTicksPerFrame: 120
   minRegulatedTimeScale: 1
   germinationStepsPerDay: 24
+  enableResearchLogging: 1
+  traitSnapshotIntervalDays: 5
   fpsText: {fileID: 1801171891}
   timeText: {fileID: 2002742904}
   simTimeText: {fileID: 1068352089}
