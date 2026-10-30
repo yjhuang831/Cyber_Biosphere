@@ -620,6 +620,7 @@ public class TimeController : MonoBehaviour
                 accumulatedAge = IncrementWithWrap(accumulatedAge, MAX_DAY_COUNTER); // Increment accumulated age at the end of each night
                 FinishGerminationDay();
                 seedManager.SeedDecay();
+                grassManager.UpdateGenera();
                 long completedDay = simDaysSinceStart > 0 ? simDaysSinceStart - 1 : MAX_DAY_COUNTER - 1;
                 if (researchLogger != null)
                 {

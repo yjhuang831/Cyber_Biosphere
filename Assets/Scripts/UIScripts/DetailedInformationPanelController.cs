@@ -324,7 +324,7 @@ public class DetailedInformationPanelController : MonoBehaviour
         PlantGenome genome = currentData.grass.genome;
         List<Allele> maternal = genome.maternalDNA;
         List<Allele> paternal = genome.paternalDNA;
-        int loci = Mathf.Max(maternal != null ? maternal.Count : 0, paternal != null ? paternal.Count : 0);
+        int loci = genome.expressedLocusCount;
         if (loci == 0)
         {
             extraInfoText.text = "DNA: empty.";
@@ -584,7 +584,8 @@ public class DetailedInformationPanelController : MonoBehaviour
         PlantGenome genome = grass.genome;
         bool named = !string.IsNullOrWhiteSpace(genome.genus) && !string.IsNullOrWhiteSpace(genome.species);
         string title = named ? genome.genus.Trim() + " " + genome.species.Trim() : "Unnamed plant";
-        text.Append("<b><size=115%>").Append(title).Append("</size></b>\n");
+        string titleColor = genome.genusId != PlantGenome.NO_GENUS ? "#" + ColorUtility.ToHtmlStringRGB(genome.genusColor) : "#FFFFFF";
+        text.Append("<b><size=115%>").Append(Colored(titleColor, title)).Append("</size></b>\n");
 
         string lineage = ResolveLineageName(genome.speciesGuid);
         if (lineage != null && lineage != title)
@@ -594,7 +595,8 @@ public class DetailedInformationPanelController : MonoBehaviour
 
         string ancestry = string.IsNullOrWhiteSpace(genome.origin) ? "unknown" : genome.origin.Trim();
         text.Append("Ancestry: ").Append(ancestry).Append(" · Generation ").Append(Mathf.Max(0, genome.generation)).Append('\n');
-        text.Append(DescribePlantType(genome.GetPlantType())).Append(" · ").Append(genome.GetDominantDNALocusCount()).Append(" genes\n");
+        text.Append(Colored(MUTED_COLOR, "Breeds only within its genus")).Append('\n');
+        text.Append(DescribePlantType(genome.GetPlantType())).Append(" · ").Append(genome.expressedLocusCount).Append(" genes\n");
     }
 
     private static string ResolveLineageName(string speciesGuid)
@@ -790,7 +792,7 @@ public class DetailedInformationPanelController : MonoBehaviour
 
     private static void AppendEnergyBudget(StringBuilder text, GrassInstance grass, EnvironmentData envData, GrassInstance.EnergyBudget budget)
     {
-        int genes = grass.genome.GetDominantDNALocusCount();
+        int genes = grass.genome.expressedLocusCount;
         AppendFlow(text, '+', "Photosynthesis", budget.photosynthesis, budget.photosynthesisOn ? null : PhotosynthesisOffReason(grass, envData), null);
         AppendFlow(text, '+', "Respiration", budget.respiration, budget.respirationOn ? null : RespirationOffReason(grass, envData), "burns tile oxygen");
         AppendFlow(text, '-', "Gene upkeep", budget.geneUpkeep, null, genes + " genes");

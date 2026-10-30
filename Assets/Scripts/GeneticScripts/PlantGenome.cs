@@ -8,18 +8,35 @@ public class PlantGenome
     public float[] phenotypes;
 
     [Header("Classification")]
+    // Binomial name: generated ("A a") or a saved species' name. Inherited, and kept in step with genusId by GenusTracker
     public string genus;
-    public string species; // Backward-compatible taxonomy field; no longer used as a runtime restriction
+    public string species;
     public string origin; // Human-visible provenance/origin tag for saved species and descendants
     // Library species this lineage descends from (32-hex GUID). Inherited by clones and by crosses within
     // the same lineage; null for wild plants and cross-lineage hybrids. Names are labels, this is the identity.
     public string speciesGuid;
-    public Color genusColor; // Color assigned to this genus
+    public Color genusColor; // Colour of this genus's founder (see GenusTracker); shown by the Genus overlay
     public int generation; // 0 for founders, increments by 1 per offspring event
+    // Both strands stay sorted by traitId; the nth copy of a trait pairs with the nth copy on the other strand (see GeneManager)
     public List<Allele> maternalDNA;
     public List<Allele> paternalDNA;
-    // 0 = maternal strand is dominant, 1 = paternal strand is dominant
-    internal byte dominantDNA = 0;
+    // Loci the plant expresses: homologous pairs count once, unpaired copies once each. Basis for gene upkeep; set with phenotypes
+    internal int expressedLocusCount = 0;
+    // Per-trait summaries for GeneManager.GeneticDistance, set with phenotypes and never modified afterwards
+    internal int[] lociPerTrait;
+    internal float[] normalizedTraitValues; // Mean expressed allele per trait, 0..1 of the allele range
+
+    // Reproductive group (see GenusTracker)
+    internal const int NO_GENUS = -1;
+    internal int genusId = NO_GENUS;
+
+    internal void InheritGenus(PlantGenome parent)
+    {
+        genusId = parent.genusId;
+        genusColor = parent.genusColor;
+        genus = parent.genus;
+        species = parent.species;
+    }
 
     /// <summary>
     /// Classifies the plant type based on hydration requirement.
@@ -47,32 +64,6 @@ public class PlantGenome
             return phenotypes[traitId];
         }
         return 0f;
-    }
-
-    internal bool UsesMaternalDominantDNA()
-    {
-        return dominantDNA == 0;
-    }
-
-    internal List<Allele> GetDominantDNA()
-    {
-        bool useMaternal = UsesMaternalDominantDNA();
-        if (useMaternal)
-        {
-            return maternalDNA;
-        }
-        return paternalDNA;
-    }
-
-    internal int GetDominantDNALocusCount()
-    {
-        List<Allele> dominant = GetDominantDNA();
-        return dominant != null ? dominant.Count : 0;
-    }
-
-    internal void SetDominantDNA(bool useMaternal)
-    {
-        dominantDNA = useMaternal ? (byte)0 : (byte)1;
     }
 
     /// <summary>

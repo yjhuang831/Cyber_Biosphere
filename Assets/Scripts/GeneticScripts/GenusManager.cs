@@ -448,8 +448,7 @@ public class GenusManager : MonoBehaviour
             genus = genus,
             species = species,
             origin = null,
-            speciesGuid = speciesGuid,
-            dominantDNA = genome.dominantDNA
+            speciesGuid = speciesGuid
         };
 
         if (genome.maternalDNA != null && genome.maternalDNA.Count > 0)
@@ -482,7 +481,7 @@ public class GenusManager : MonoBehaviour
     private static string BuildContentGuid(string genus, string species, PlantGenomeState genome)
     {
         StringBuilder canonical = new StringBuilder();
-        canonical.Append(genus).Append('|').Append(species).Append('|').Append(genome.dominantDNA).Append('|');
+        canonical.Append(genus).Append('|').Append(species).Append('|');
         AppendAlleles(canonical, genome.maternalDNA);
         canonical.Append('|');
         AppendAlleles(canonical, genome.paternalDNA);

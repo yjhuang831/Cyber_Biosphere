@@ -270,7 +270,7 @@ public class GrassInstance
         }
 
         float costScale = dormancyEffect * nightEffect * grassDensity;
-        budget.geneUpkeep = metabolismCostPerAllele * genome.GetDominantDNALocusCount() * costScale;
+        budget.geneUpkeep = metabolismCostPerAllele * genome.expressedLocusCount * costScale;
         budget.ageing = ageEffect * costScale;
 
         float growthExpense = baseGrowthCost * grassDensity * nightEffect;
@@ -393,7 +393,7 @@ public class GrassInstance
         }
 
         // [OPTIMIZED] Compute metabolism cost inline to avoid method call overhead
-        float actualMetabolismCost = (metabolismCostPerAllele * genome.GetDominantDNALocusCount() + ageEffect) * dormancyEffect * nightEffect;
+        float actualMetabolismCost = (metabolismCostPerAllele * genome.expressedLocusCount + ageEffect) * dormancyEffect * nightEffect;
         float maintenanceEnergy = actualMetabolismCost * grassDensity * time;
         energyStored -= maintenanceEnergy;
 

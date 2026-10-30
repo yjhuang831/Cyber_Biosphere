@@ -1,4 +1,6 @@
 using UnityEngine;
+using UnityEngine.EventSystems;
+using TMPro;
 
 public class GrassSpawnInput : MonoBehaviour
 {
@@ -8,6 +10,15 @@ public class GrassSpawnInput : MonoBehaviour
 
     void Update()
     {
+        // H: quick start (ignored while typing, since one stray letter would plant a whole batch)
+        if (Input.GetKeyDown(KeyCode.H) && !IsTypingInInputField())
+        {
+            if (mapManager != null && grassManager != null && mapManager.allowTileModification)
+            {
+                grassManager.SpawnRandomGrasses();
+            }
+        }
+
         if (Input.GetKeyDown(KeyCode.G))
         {
             if (mapManager == null || grassManager == null || !mapManager.allowTileModification)
@@ -43,5 +54,11 @@ public class GrassSpawnInput : MonoBehaviour
                 }
             }
         }
+    }
+
+    private static bool IsTypingInInputField()
+    {
+        GameObject selected = EventSystem.current != null ? EventSystem.current.currentSelectedGameObject : null;
+        return selected != null && selected.GetComponent<TMP_InputField>() != null;
     }
 }

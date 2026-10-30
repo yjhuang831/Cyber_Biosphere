@@ -52,10 +52,8 @@ public class GrassDataPanelController : MonoBehaviour
         GrassInstance grass = data.grass;
         PlantGenome genome = grass.genome;
 
-        string originText = string.IsNullOrWhiteSpace(genome.origin)
-            ? ((genome.genus ?? "unknown") + " " + (genome.species ?? "unknown"))
-            : genome.origin;
-        idText.text = originText;
+        bool named = !string.IsNullOrWhiteSpace(genome.genus) && !string.IsNullOrWhiteSpace(genome.species);
+        idText.text = named ? genome.genus + " " + genome.species : genome.origin;
         energyText.text = "Energy: " + grass.energyStored.ToString("F1") + " kJ";
         densityText.text = "Density: " + (grass.grassDensity * 100f).ToString("F1") + "%";
         tempText.text = "Temp Opt: " + FormatTemperatureCelsius(genome.GetTraitValue(TraitId.TemperatureTolerance));

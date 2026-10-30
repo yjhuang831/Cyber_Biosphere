@@ -20,6 +20,15 @@ public class GrassManager : MonoBehaviour
     [Tooltip("Clone attempts each plant may make per sim day. 0 = unlimited (one attempt per plant update, the original behaviour).")]
     [Min(0)] public int maxCloneAttemptsPerDay = 0;
 
+    [Header("Breeding and Genera")]
+    [Tooltip("Genetic distance at which two plants can no longer breed; below it, pollination odds fall in proportion to distance. " +
+             "Unrelated wild plants average about 0.55. Lower = more genera, sooner.")]
+    [Min(0.01f)] public float maxBreedingDistance = 0.4f;
+
+    [Header("Quick Start")]
+    [Tooltip("Share of map tiles SpawnRandomGrasses plants, e.g. 0.02 = 2% of tiles (18 plants on a 30x30 map).")]
+    [Range(0f, 1f)] public float quickStartGrassFraction = 0.02f;
+
     [Header("Plant Carbon")]
     [Tooltip("Carbon fixed per unit of photosynthesis energy, and released per unit of energy respired (upkeep, ageing, night respiration).")]
     [Min(0f)] public float carbonPerEnergy = 0.01f;
@@ -35,6 +44,10 @@ public class GrassManager : MonoBehaviour
     private ListPool<Vector3Int> positionListPool;
     private const long MAX_PLANT_COUNTER = 1_000_000_000L;
     internal long plantCount = 0;
+
+    internal readonly GenusTracker genusTracker = new GenusTracker();
+    private readonly List<PlantGenome> plantGenomesScratch = new List<PlantGenome>();
+    private readonly List<PlantGenome> seedGenomesScratch = new List<PlantGenome>();
 
     void Start()
     {
@@ -226,6 +239,7 @@ public class GrassManager : MonoBehaviour
             newGenome = genome;
             isSavedSpecies = true;
         }
+        EnsureGenusAssigned(newGenome);
 
         targetData.grass = new GrassInstance(gridposition, newGenome);
         if (genome != null)
@@ -239,6 +253,107 @@ public class GrassManager : MonoBehaviour
             plantCount = IncrementWithWrap(plantCount);
         }
         mapManager.UpdateGrassTile(targetData, gridposition);
+    }
+
+    /// <summary>
+    /// New plants have no mother to inherit a genus from. Library species keep their saved names and their own
+    /// genus; wild plants are placed by genetics.
+    /// </summary>
+    private void EnsureGenusAssigned(PlantGenome genome)
+    {
+        if (genome.genusId != PlantGenome.NO_GENUS)
+            return;
+
+        if (string.IsNullOrEmpty(genome.speciesGuid))
+        {
+            genusTracker.Assign(genome, maxBreedingDistance, TimeController.simDaysSinceStart);
+        }
+        else
+        {
+            genusTracker.AssignLibrary(genome, genome.genus, genome.species, genome.speciesGuid, TimeController.simDaysSinceStart);
+        }
+    }
+
+    /// <summary>
+    /// Daily genus update (called at dawn) over all plants, seeds on the ground, and seeds still forming on plants.
+    /// </summary>
+    internal void UpdateGenera()
+    {
+        plantGenomesScratch.Clear();
+        seedGenomesScratch.Clear();
+
+        foreach (GrassInstance grass in activeGrassInstances.Values)
+        {
+            plantGenomesScratch.Add(grass.genome);
+            if (grass.seedGenome != null)
+            {
+                seedGenomesScratch.Add(grass.seedGenome);
+            }
+        }
+
+        if (seedManager != null)
+        {
+            foreach (List<Seed> seeds in seedManager.activeSeeds.Values)
+            {
+                for (int i = 0; i < seeds.Count; i++)
+                {
+                    seedGenomesScratch.Add(seeds[i].carriedGenome);
+                }
+            }
+        }
+
+        genusTracker.UpdateDaily(plantGenomesScratch, seedGenomesScratch, maxBreedingDistance, TimeController.simDaysSinceStart);
+    }
+
+    /// <summary>
+    /// Pollination odds multiplier: 1 for identical plants, falling to 0 at maxBreedingDistance.
+    /// Plants in different genera can never breed.
+    /// </summary>
+    private float BreedingCompatibility(PlantGenome a, PlantGenome b)
+    {
+        if (a.genusId != b.genusId)
+            return 0f;
+        return Mathf.Clamp01(1f - GeneManager.GeneticDistance(a, b) / maxBreedingDistance);
+    }
+
+    /// <summary>
+    /// Quick start: plants random wild genomes on random free tiles (land or water), with the count proportional
+    /// to map size (quickStartGrassFraction). Each plant adapts to its tile, as with a manual spawn.
+    /// Public for wiring to a UI button. Returns the number of plants added.
+    /// </summary>
+    [ContextMenu("Spawn Random Grasses")]
+    public int SpawnRandomGrasses()
+    {
+        if (mapManager == null)
+        {
+            Debug.LogWarning("SpawnRandomGrasses failed: MapManager reference is missing.");
+            return 0;
+        }
+
+        int spawned = 0;
+        using (var pooled = GetPooledPositions())
+        {
+            // Work on a copy: GetAllTilePositions returns the map's shared list
+            List<Vector3Int> tiles = pooled.List;
+            tiles.AddRange(mapManager.GetAllTilePositions());
+            int target = Mathf.RoundToInt(tiles.Count * Mathf.Clamp01(quickStartGrassFraction));
+
+            // Partial Fisher-Yates: visits tiles in random order without repeats, skipping occupied ones
+            for (int i = 0; i < tiles.Count && spawned < target; i++)
+            {
+                int pick = Random.Range(i, tiles.Count);
+                Vector3Int tile = tiles[pick];
+                tiles[pick] = tiles[i];
+
+                EnvironmentData data = mapManager.GetTileEnvironmentData(tile);
+                if (data.grass != null)
+                    continue;
+
+                SpawnNewGrass(data, tile);
+                spawned++;
+            }
+        }
+        return spawned;
     }
 
     /// <summary>
@@ -270,6 +385,7 @@ public class GrassManager : MonoBehaviour
             return false;
         }
 
+        EnsureGenusAssigned(genome);
         targetData.grass = new GrassInstance(tilePosition, genome);
         targetData.grass.energyStored = initialEnergy;
         activeGrassInstances[tilePosition] = targetData.grass;
@@ -320,9 +436,6 @@ public class GrassManager : MonoBehaviour
             paternalDNA = DeserializeAlleles(source.paternalDNA)
         };
 
-        bool useMaternalDominant = source.dominantDNA != 1;
-        genome.SetDominantDNA(useMaternalDominant);
-
         if (geneManager != null)
         {
             geneManager.RebuildLoadedGenomeDerivedData(genome);
@@ -337,7 +450,8 @@ public class GrassManager : MonoBehaviour
 
     /// <summary>
     /// Pushes a library species rename onto genomes living in this simulation (plants, pending seed genomes, seeds).
-    /// Founders spawned from the library carry the names; their pure lineage carries the old epithet as origin tag.
+    /// Members of the species' genus take the new names (descendants that split into another genus keep theirs);
+    /// its pure lineage also carries the old epithet as origin tag.
     /// Hybrid origin tags ("A × B") are historical records and are left untouched.
     /// </summary>
     internal void ApplySpeciesRename(string speciesGuid, string oldSpecies, string newGenus, string newSpecies)
@@ -345,10 +459,12 @@ public class GrassManager : MonoBehaviour
         if (string.IsNullOrEmpty(speciesGuid))
             return;
 
+        GenusRecord genus = genusTracker.RenameLibrarySpecies(speciesGuid, newGenus, newSpecies, TimeController.simDaysSinceStart, out int oldGenusId);
+
         foreach (GrassInstance grass in activeGrassInstances.Values)
         {
-            RenameGenome(grass.genome, speciesGuid, oldSpecies, newGenus, newSpecies);
-            RenameGenome(grass.seedGenome, speciesGuid, oldSpecies, newGenus, newSpecies);
+            RenameGenome(grass.genome, speciesGuid, oldSpecies, oldGenusId, genus, newSpecies);
+            RenameGenome(grass.seedGenome, speciesGuid, oldSpecies, oldGenusId, genus, newSpecies);
         }
 
         if (seedManager != null)
@@ -357,7 +473,7 @@ public class GrassManager : MonoBehaviour
             {
                 for (int i = 0; i < seeds.Count; i++)
                 {
-                    RenameGenome(seeds[i].carriedGenome, speciesGuid, oldSpecies, newGenus, newSpecies);
+                    RenameGenome(seeds[i].carriedGenome, speciesGuid, oldSpecies, oldGenusId, genus, newSpecies);
                 }
             }
         }
@@ -365,8 +481,8 @@ public class GrassManager : MonoBehaviour
 
     /// <summary>
     /// Makes a living plant the founding specimen of a newly saved library species, using the same convention as
-    /// plants spawned from the library (names set, origin tag = epithet). The plant gets its own genome copy so
-    /// genetically identical siblings sharing the genome object are not swept into the species.
+    /// plants spawned from the library (its own genus under the saved names, origin tag = epithet). The plant gets its
+    /// own genome copy so genetically identical siblings sharing the genome object are not swept into the species.
     /// </summary>
     internal void AssignSpecimenToSpecies(GrassInstance grass, string speciesGuid, string genus, string species)
     {
@@ -375,20 +491,21 @@ public class GrassManager : MonoBehaviour
 
         PlantGenome specimen = grass.genome.DeepCopy();
         specimen.speciesGuid = speciesGuid;
-        specimen.genus = genus;
-        specimen.species = species;
         specimen.origin = species;
+        genusTracker.AssignLibrary(specimen, genus, species, speciesGuid, TimeController.simDaysSinceStart);
         grass.genome = specimen;
     }
 
-    private static void RenameGenome(PlantGenome genome, string speciesGuid, string oldSpecies, string newGenus, string newSpecies)
+    private static void RenameGenome(PlantGenome genome, string speciesGuid, string oldSpecies, int oldGenusId, GenusRecord genus, string newSpecies)
     {
         if (genome == null || genome.speciesGuid != speciesGuid)
             return;
 
-        if (!string.IsNullOrWhiteSpace(genome.genus) || !string.IsNullOrWhiteSpace(genome.species))
+        if (genus != null && genome.genusId == oldGenusId)
         {
-            genome.genus = newGenus;
+            genome.genusId = genus.id;
+            genome.genusColor = genus.founderColor;
+            genome.genus = genus.name;
             genome.species = newSpecies;
         }
         if (genome.origin == oldSpecies)
@@ -525,6 +642,16 @@ public class GrassManager : MonoBehaviour
                 if (!targetGrass.IsFlowering)
                     continue;
 
+                float compatibilityFactor = BreedingCompatibility(targetGrass.genome, grass.genome);
+                if (compatibilityFactor <= 0f)
+                {
+                    if (targetGrass.genome.genusId != grass.genome.genusId)
+                    {
+                        ResearchCounters.Today.crossesBlockedByGenus++;
+                    }
+                    continue;
+                }
+
                 // Manhattan distance success falloff
                 int dist = Mathf.Abs(tile.x - grassPos.x) + Mathf.Abs(tile.y - grassPos.y);
                 float maxSuccess = 0.95f;
@@ -536,8 +663,6 @@ public class GrassManager : MonoBehaviour
                     float localRadiation = receiverData.radiation;
 
                     var maternalGamete = geneManager.Meiosis(targetGrass.genome, localRadiation);
-                    float traitCompositionDivergence = CalculateTraitCompositionDivergence(maternalGamete, pollenGamete);
-                    float compatibilityFactor = Mathf.Clamp01(1f - traitCompositionDivergence);
                     float adjustedSuccess = success * compatibilityFactor;
 
                     if (Random.value <= adjustedSuccess)
@@ -551,6 +676,7 @@ public class GrassManager : MonoBehaviour
                             grass.genome.origin,
                             targetGrass.genome.speciesGuid,
                             grass.genome.speciesGuid);
+                        seedGenome.InheritGenus(targetGrass.genome);
 
                         targetGrass.reproductiveState = ReproductiveState.Seeding;
                         targetGrass.seedGenome = seedGenome;
@@ -559,48 +685,6 @@ public class GrassManager : MonoBehaviour
                 }
             }
         }
-    }
-
-    // [OPTIMIZED] Reused per-trait locus count buffer (left minus right) for divergence checks
-    private int[] traitCountDelta = new int[32];
-
-    private float CalculateTraitCompositionDivergence(List<Allele> left, List<Allele> right)
-    {
-        if (left == null || right == null)
-        {
-            return 0f;
-        }
-
-        int maxTraitId = -1;
-        for (int i = 0; i < left.Count; i++)
-            maxTraitId = Mathf.Max(maxTraitId, left[i].traitId);
-        for (int i = 0; i < right.Count; i++)
-            maxTraitId = Mathf.Max(maxTraitId, right[i].traitId);
-        if (maxTraitId >= traitCountDelta.Length)
-        {
-            traitCountDelta = new int[maxTraitId + 1];
-        }
-
-        for (int i = 0; i < left.Count; i++)
-        {
-            if (left[i].traitId >= 0)
-                traitCountDelta[left[i].traitId]++;
-        }
-        for (int i = 0; i < right.Count; i++)
-        {
-            if (right[i].traitId >= 0)
-                traitCountDelta[right[i].traitId]--;
-        }
-
-        int totalAlleles = left.Count + right.Count;
-        float divergence = 0f;
-        for (int t = 0; t <= maxTraitId; t++)
-        {
-            divergence += Mathf.Abs(traitCountDelta[t]);
-            traitCountDelta[t] = 0; // leave the buffer clean for the next call
-        }
-
-        return totalAlleles > 0 ? divergence / totalAlleles : 0f;
     }
 
     private void SelfPollinate(GrassInstance parent, Vector3Int parentPos)
@@ -625,6 +709,7 @@ public class GrassManager : MonoBehaviour
                 parent.genome.origin,
                 parent.genome.speciesGuid,
                 parent.genome.speciesGuid);
+            seedGenome.InheritGenus(parent.genome);
 
             parent.reproductiveState = ReproductiveState.Seeding;
             parent.seedGenome = seedGenome;

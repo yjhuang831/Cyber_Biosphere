@@ -256,6 +256,55 @@ public static class SimulationLoadSystem
         return result;
     }
 
+    /// <summary>
+    /// Saves before schema 11 have no named genera; their plants are grouped at the next daily update.
+    /// </summary>
+    private static void RestoreGenera(SimulationSnapshot snapshot, PlantGenome[] genomes, GenusTracker tracker)
+    {
+        tracker.Clear();
+        if (snapshot.schemaVersion < 11 || snapshot.genera == null)
+            return;
+
+        tracker.RestoreCounters(snapshot.nextGenusId, snapshot.nextGenusNameIndex);
+        for (int i = 0; i < snapshot.genera.Count; i++)
+        {
+            GenusState state = snapshot.genera[i];
+            GenusRecord genus = new GenusRecord
+            {
+                id = state.id,
+                name = state.name,
+                isLibrary = state.isLibrary,
+                nextSpeciesIndex = state.nextSpeciesIndex,
+                parentGenusId = state.parentGenusId,
+                foundedDay = state.foundedDay,
+                founderColor = state.founderColor != null
+                    ? new Color(state.founderColor.r, state.founderColor.g, state.founderColor.b, state.founderColor.a)
+                    : Color.white
+            };
+            if (state.species != null)
+            {
+                for (int s = 0; s < state.species.Count; s++)
+                {
+                    string guid = state.species[s].speciesGuid;
+                    genus.species.Add(new SpeciesRecord { name = state.species[s].name, speciesGuid = string.IsNullOrEmpty(guid) ? null : guid });
+                }
+            }
+            if (state.representativeGenomeIndices != null)
+            {
+                int slot = 0;
+                for (int r = 0; r < state.representativeGenomeIndices.Count && slot < GenusTracker.REPRESENTATIVES; r++)
+                {
+                    PlantGenome representative = LookupGenome(genomes, state.representativeGenomeIndices[r]);
+                    if (representative != null)
+                    {
+                        genus.representatives[slot++] = representative;
+                    }
+                }
+            }
+            tracker.Restore(genus);
+        }
+    }
+
     private static PlantGenome LookupGenome(PlantGenome[] genomes, int index)
     {
         return index >= 0 && index < genomes.Length ? genomes[index] : null;
@@ -281,6 +330,7 @@ public static class SimulationLoadSystem
 
         grassManager.activeGrassInstances.Clear();
         seedManager.activeSeeds.Clear();
+        RestoreGenera(snapshot, genomes, grassManager.genusTracker);
 
         // Terrain and per-tile environment
         Dictionary<long, TileState> tileLookup = BuildTileLookup(snapshot.tiles);
@@ -535,6 +585,7 @@ public static class SimulationLoadSystem
             species = source.species,
             origin = source.origin,
             speciesGuid = string.IsNullOrWhiteSpace(source.speciesGuid) ? null : source.speciesGuid,
+            genusId = source.genusId,
             generation = source.generation,
             genusColor = source.genusColor != null
                 ? new Color(source.genusColor.r, source.genusColor.g, source.genusColor.b, source.genusColor.a)
@@ -543,9 +594,6 @@ public static class SimulationLoadSystem
 
         genome.maternalDNA = DeserializeAlleles(source.maternalDNA);
         genome.paternalDNA = DeserializeAlleles(source.paternalDNA);
-
-        bool useMaternalDominant = source.dominantDNA != 1;
-        genome.SetDominantDNA(useMaternalDominant);
 
         if (geneManager != null)
         {

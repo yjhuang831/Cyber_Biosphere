@@ -189,6 +189,38 @@ public static class SimulationSaveSystem
         snapshot.counters.plantCount = snapshot.plants.Count;
         snapshot.counters.seedCount = snapshot.seeds.Count;
 
+        snapshot.nextGenusId = grassManager.genusTracker.NextGenusId;
+        snapshot.nextGenusNameIndex = grassManager.genusTracker.NextGenusNameIndex;
+        snapshot.genera = new List<GenusState>(grassManager.genusTracker.Count);
+        foreach (GenusRecord genus in grassManager.genusTracker.Genera)
+        {
+            GenusState state = new GenusState
+            {
+                id = genus.id,
+                name = genus.name,
+                isLibrary = genus.isLibrary,
+                species = new List<SpeciesState>(genus.species.Count),
+                nextSpeciesIndex = genus.nextSpeciesIndex,
+                parentGenusId = genus.parentGenusId,
+                foundedDay = genus.foundedDay,
+                founderColor = new ColorState { r = genus.founderColor.r, g = genus.founderColor.g, b = genus.founderColor.b, a = genus.founderColor.a },
+                representativeGenomeIndices = new List<int>(GenusTracker.REPRESENTATIVES)
+            };
+            for (int i = 0; i < genus.species.Count; i++)
+            {
+                state.species.Add(new SpeciesState { name = genus.species[i].name, speciesGuid = genus.species[i].speciesGuid });
+            }
+            for (int i = 0; i < genus.representatives.Length; i++)
+            {
+                int genomeIndex = genomeTable.IndexOf(genus.representatives[i]);
+                if (genomeIndex >= 0)
+                {
+                    state.representativeGenomeIndices.Add(genomeIndex);
+                }
+            }
+            snapshot.genera.Add(state);
+        }
+
         return snapshot;
     }
 
@@ -332,8 +364,8 @@ public static class SimulationSaveSystem
             species = genome.species,
             origin = genome.origin,
             speciesGuid = genome.speciesGuid,
+            genusId = genome.genusId,
             generation = genome.generation,
-            dominantDNA = genome.dominantDNA,
             genusColor = new ColorState
             {
                 r = genome.genusColor.r,

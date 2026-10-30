@@ -3,7 +3,7 @@ using System.Collections.Generic;
 
 internal static class SimulationSnapshotConstants
 {
-    public const int SchemaVersion = 9;
+    public const int SchemaVersion = 11;
     public const int MinimumSupportedSchemaVersion = 6;
     public const string AutosaveFolder = "Autosaves";
     public const string ManualSaveFolder = "ManualSaves";
@@ -30,6 +30,9 @@ internal class SimulationSnapshot
     public List<PlantGenomeState> genomes;
     public List<GrassState> plants;
     public List<SeedState> seeds;
+    public List<GenusState> genera;   // Schema 11+
+    public int nextGenusId;
+    public int nextGenusNameIndex;
 }
 
 [Serializable]
@@ -170,12 +173,32 @@ internal class PlantGenomeState
     public string species;
     public string origin;
     public string speciesGuid;
+    public int genusId;
     public int generation;
     public ColorState genusColor;
     public List<AlleleState> maternalDNA;
     public List<AlleleState> paternalDNA;
-    // 0 = maternal, 1 = paternal
-    public int dominantDNA;
+}
+
+[Serializable]
+internal class GenusState
+{
+    public int id;
+    public string name;
+    public bool isLibrary;
+    public List<SpeciesState> species;
+    public int nextSpeciesIndex;
+    public int parentGenusId;
+    public long foundedDay;
+    public ColorState founderColor;
+    public List<int> representativeGenomeIndices; // Into SimulationSnapshot.genomes
+}
+
+[Serializable]
+internal class SpeciesState
+{
+    public string name;
+    public string speciesGuid;
 }
 
 [Serializable]

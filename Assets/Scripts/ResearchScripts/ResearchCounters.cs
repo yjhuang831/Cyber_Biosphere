@@ -92,4 +92,8 @@ internal class DailyEventCounts
 
     public int dormancyEntries;
     public int dormancyExits;
+
+    public int generaFounded;      // New genera, from new wild plants or from groups that stopped being able to breed
+    public int generaExtinct;
+    public int crossesBlockedByGenus; // Pollen reached a flowering plant of another genus
 }

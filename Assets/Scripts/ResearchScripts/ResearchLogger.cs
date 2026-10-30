@@ -183,6 +183,7 @@ internal class ResearchLogger
 
         AddPlantStats(summary);
         AddSeedStats(summary);
+        AddGenusStats(summary);
         AddEnvironmentStats(summary);
         summary.totalCarbon = summary.atmosphericCarbon + summary.plantCarbon + summary.litterCarbon + summary.soilCarbon + summary.dissolvedCarbon;
         return summary;
@@ -210,7 +211,7 @@ internal class ResearchLogger
             density += grass.grassDensity;
             age += grass.age;
             generation += grass.genome.generation;
-            loci += grass.genome.GetDominantDNALocusCount();
+            loci += grass.genome.expressedLocusCount;
             summary.maxGeneration = Mathf.Max(summary.maxGeneration, grass.genome.generation);
 
             string guid = grass.genome.speciesGuid;
@@ -252,6 +253,27 @@ internal class ResearchLogger
         if (genusManager != null && genusManager.TryGetSpeciesEntry(guid, out GenusManager.SpeciesEntry entry))
             return entry.DisplayName;
         return null;
+    }
+
+    private void AddGenusStats(DailySummary summary)
+    {
+        summary.genera = new List<GenusCount>(grassManager.genusTracker.Count);
+        foreach (GenusRecord genus in grassManager.genusTracker.Genera)
+        {
+            summary.genera.Add(new GenusCount
+            {
+                id = genus.id,
+                name = genus.name,
+                isLibrary = genus.isLibrary,
+                speciesCount = genus.species.Count,
+                parentGenusId = genus.parentGenusId,
+                foundedDay = genus.foundedDay,
+                plants = genus.plants,
+                seeds = genus.seeds
+            });
+        }
+        summary.genera.Sort((a, b) => b.plants.CompareTo(a.plants));
+        summary.generaAlive = summary.genera.Count;
     }
 
     private void AddSeedStats(DailySummary summary)
@@ -351,24 +373,14 @@ internal class ResearchLogger
                 traitCount = Mathf.Max(traitCount, phenotypes.Length);
         }
 
-        // Which plants carry at least one locus for each trait (in the strand that sets their phenotype)
+        // Which plants carry at least one locus for each trait (on either strand; both are expressed)
         int[] plantsWithLoci = new int[traitCount];
         bool[] seen = new bool[traitCount];
         for (int p = 0; p < plants.Count; p++)
         {
             Array.Clear(seen, 0, seen.Length);
-            List<Allele> dominant = plants[p].genome.GetDominantDNA();
-            if (dominant == null)
-                continue;
-            for (int i = 0; i < dominant.Count; i++)
-            {
-                int traitId = dominant[i].traitId;
-                if (traitId >= 0 && traitId < traitCount && !seen[traitId])
-                {
-                    seen[traitId] = true;
-                    plantsWithLoci[traitId]++;
-                }
-            }
+            CountTraitsOnStrand(plants[p].genome.maternalDNA, seen, plantsWithLoci);
+            CountTraitsOnStrand(plants[p].genome.paternalDNA, seen, plantsWithLoci);
         }
 
         float[] values = new float[plants.Count];
@@ -405,6 +417,21 @@ internal class ResearchLogger
             });
         }
         return snapshot;
+    }
+
+    private static void CountTraitsOnStrand(List<Allele> strand, bool[] seen, int[] plantsWithLoci)
+    {
+        if (strand == null)
+            return;
+        for (int i = 0; i < strand.Count; i++)
+        {
+            int traitId = strand[i].traitId;
+            if (traitId >= 0 && traitId < seen.Length && !seen[traitId])
+            {
+                seen[traitId] = true;
+                plantsWithLoci[traitId]++;
+            }
+        }
     }
 
     private static float Percentile(float[] sorted, float fraction)
@@ -485,6 +512,8 @@ internal class DailySummary
     public float meanLoci;
     public int plantsInLibraryLineages;
     public List<LineageCount> lineages;
+    public int generaAlive;
+    public List<GenusCount> genera;
 
     public int seeds;
     public int tilesWithSeeds;
@@ -517,6 +546,19 @@ internal class DailySummary
     public float meanEnergyCapacity;
 
     public DailyEventCounts events;
+}
+
+[Serializable]
+internal class GenusCount
+{
+    public int id;
+    public string name;
+    public bool isLibrary;
+    public int speciesCount;
+    public int parentGenusId;   // -1 for original lineages
+    public long foundedDay;
+    public int plants;
+    public int seeds;
 }
 
 [Serializable]
