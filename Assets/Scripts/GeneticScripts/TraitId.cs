@@ -30,6 +30,8 @@ public static class TraitId
     public const int GerminationCue = 23;        // Min habitat suitability (0..1) for a seed to progress germination; 0 = no check
     public const int SeedColdPreservation = 24;  // Share of daily seed decay avoided in the cold; 0 = none
 
+    public const int StarchStorage = 25;         // Maximum starch the plant can develop storage for
+
     // Number of trait ids; used for fallback phenotype arrays when no TraitDatabase is available
-    public const int Count = 25;
+    public const int Count = 26;
 }

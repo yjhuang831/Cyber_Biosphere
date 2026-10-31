@@ -32,8 +32,6 @@ public class EnvironmentManager : MonoBehaviour
     public float baseLightLevel = 0f;
 
     [Header("Map Nutrient Pools (N/P/K not yet linked to plants)")]
-    public float landSoilOrganicCarbon = 60f;
-    public float waterSoilOrganicCarbon = 12f;
     public float landNitrogen = 35f;
     public float waterNitrogen = 12f;
     public float landPhosphorus = 24f;
@@ -46,20 +44,14 @@ public class EnvironmentManager : MonoBehaviour
 
     [Header("Atmospheric CO2 and Photosynthesis")]
     [Tooltip("Atmospheric carbon per map tile at which photosynthesis runs at its normal rate (x1). New maps start at this level.")]
-    [Min(0.01f)] public float referenceAtmosphericCarbonPerTile = 20f;
+    [Min(0.01f)] public float referenceAtmosphericCarbonPerTile = 50f;
     [Tooltip("Half-saturation of the CO2 response, as a fraction of the reference level. Photosynthesis is x1 at the reference, " +
              "falls toward 0 as CO2 runs out, and approaches x(1 + this) when CO2 is plentiful.")]
     [Min(0.01f)] public float co2HalfSaturationFraction = 0.5f;
 
     [Header("Litter (Decay Pool)")]
-    [Tooltip("Share of each tile's litter (carbon from dead or shrinking plants) that becomes soil organic carbon per sim second.")]
+    [Tooltip("Share of each tile's litter (carbon from dead plants) that decays into atmospheric CO2 per sim second.")]
     [Min(0f)] public float litterDecayRate = 0.0005f;
-    [Tooltip("Carbon pool rate per simulated second.")]
-    [Min(0f)] public float carbonDecompositionRate = 0.00001f;
-    [Tooltip("Atmosphere-to-water carbon exchange rate per simulated second.")]
-    [Min(0f)] public float aquaticCarbonUptakeRate = 0.00001f;
-    [Tooltip("Dissolved carbon burial rate per simulated second.")]
-    [Min(0f)] public float carbonSedimentationRate = 0.000001f;
     [Tooltip("Relative nitrogen deposition per simulated second.")]
     [Min(0f)] public float nitrogenDepositionRate = 0.00001f;
     [Tooltip("Relative phosphorus weathering per simulated second.")]
@@ -179,8 +171,6 @@ public class EnvironmentManager : MonoBehaviour
         if (data == null)
             return;
 
-        data.soilOrganicCarbon = System.Math.Max(0.0, isWater ? waterSoilOrganicCarbon : landSoilOrganicCarbon);
-        data.dissolvedCarbon = 0.0;
         data.litterCarbon = 0.0;
         data.availableNitrogen = System.Math.Max(0.0, isWater ? waterNitrogen : landNitrogen);
         data.availablePhosphorus = System.Math.Max(0.0, isWater ? waterPhosphorus : landPhosphorus);
@@ -188,7 +178,7 @@ public class EnvironmentManager : MonoBehaviour
     }
 
     // ---- Atmospheric CO2 ----
-    // Carbon only moves between pools (atmosphere, plants, litter, soil, dissolved); it is never created or destroyed,
+    // Carbon only moves between pools (atmosphere, plants, litter); it is never created or destroyed,
     // except when a new map is seeded with its starting atmosphere (and legacy saves are topped up on load).
 
     private int TileCount => mapManager != null ? Mathf.Max(1, mapManager.GetAllTilePositions().Count) : 1;
@@ -233,7 +223,7 @@ public class EnvironmentManager : MonoBehaviour
     }
 
     /// <summary>
-    /// Puts carbon from a dead or shrinking plant into its tile's decay pool; it reaches the soil over time.
+    /// Puts carbon from a dead plant into its tile's decay pool; it returns to the air over time.
     /// </summary>
     internal void AddLitter(EnvironmentData tile, double carbon)
     {
@@ -245,27 +235,17 @@ public class EnvironmentManager : MonoBehaviour
     {
         List<Vector3Int> positions = mapManager.GetAllTilePositions();
         double carbonEmitted = 0.0;
-        int waterTileCount = 0;
         double litterFraction = System.Math.Min(1.0, System.Math.Max(0.0, litterDecayRate) * simTime);
 
-        // Apply litter decay, weathering/deposition and carbon mineralization per tile.
+        // Apply litter decay and weathering/deposition per tile.
         foreach (Vector3Int pos in positions)
         {
             EnvironmentData data = mapManager.GetTileEnvironmentData(pos);
-            if (data.isWater)
-                waterTileCount++;
 
-            // Decay pool -> soil: dead plant matter slowly becomes soil organic carbon
-            double litterToSoil = data.litterCarbon * litterFraction;
-            data.litterCarbon -= litterToSoil;
-            data.soilOrganicCarbon += litterToSoil;
-
-            double moisture = Mathf.Clamp01(data.hydration / 100f);
-            double temperatureFactor = Mathf.Clamp(Mathf.Pow(2f, (data.temperature - 20f) / 10f), 0.1f, 3f);
-            double carbonLoss = System.Math.Min(data.soilOrganicCarbon,
-                data.soilOrganicCarbon * System.Math.Max(0f, carbonDecompositionRate) * temperatureFactor * moisture * simTime);
-            data.soilOrganicCarbon -= carbonLoss;
-            carbonEmitted += carbonLoss;
+            // Decay pool: dead plant matter respires to CO2
+            double litterDecayed = data.litterCarbon * litterFraction;
+            data.litterCarbon -= litterDecayed;
+            carbonEmitted += litterDecayed;
 
             double landFactor = data.isWater ? 0.25 : 1.0;
             data.availableNitrogen += System.Math.Max(0f, nitrogenDepositionRate) * landFactor * simTime;
@@ -281,31 +261,6 @@ public class EnvironmentManager : MonoBehaviour
         }
 
         atmosphericCarbon = System.Math.Max(0.0, atmosphericCarbon + carbonEmitted);
-        if (waterTileCount > 0)
-        {
-            double uptake = atmosphericCarbon * System.Math.Min(1.0, System.Math.Max(0f, aquaticCarbonUptakeRate) * simTime);
-            atmosphericCarbon -= uptake;
-            double uptakePerWaterTile = uptake / waterTileCount;
-            foreach (Vector3Int pos in positions)
-            {
-                EnvironmentData data = mapManager.GetTileEnvironmentData(pos);
-                if (data.isWater)
-                    data.dissolvedCarbon += uptakePerWaterTile;
-            }
-        }
-
-        // A small share of dissolved carbon settles into long-lived aquatic sediment.
-        foreach (Vector3Int pos in positions)
-        {
-            EnvironmentData data = mapManager.GetTileEnvironmentData(pos);
-            if (!data.isWater)
-                continue;
-
-            double burial = System.Math.Min(data.dissolvedCarbon,
-                data.dissolvedCarbon * System.Math.Max(0f, carbonSedimentationRate) * simTime);
-            data.dissolvedCarbon -= burial;
-            data.soilOrganicCarbon += burial;
-        }
 
         // Runoff carries a small share of dissolved land nutrients into adjacent water.
         foreach (Vector3Int pos in positions)

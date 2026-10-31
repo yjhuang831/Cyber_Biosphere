@@ -247,8 +247,6 @@ public class DetailedInformationPanelController : MonoBehaviour
             "\nLight: " + FormatLux(currentData.light) +
             "\nRadiation: " + FormatRadiationRate(currentData.radiation) +
             "\nOxygen: " + FormatPercent(currentData.oxygen) +
-            "\nSoil carbon: " + currentData.soilOrganicCarbon.ToString("F2") +
-            (currentData.isWater ? "\nDissolved carbon: " + currentData.dissolvedCarbon.ToString("F2") : "") +
             "\nLitter (decaying): " + currentData.litterCarbon.ToString("F2") +
             (mapManager != null && mapManager.environmentManager != null
                 ? "\nAtmospheric carbon (map): " + mapManager.environmentManager.atmosphericCarbon.ToString("F2")
@@ -630,11 +628,17 @@ public class DetailedInformationPanelController : MonoBehaviour
         text.Append("  Size: ").Append(CreateBar(grass.grassDensity, 12)).Append(' ')
             .Append((grass.grassDensity * 100f).ToString("F0")).Append("% (").Append(GetDensityStage(grass.grassDensity)).Append(")")
             .Append(Colored(MUTED_COLOR, " - storage grows with size")).Append('\n');
+        float starchMax = grass.MaxStarchCapacity;
+        float starchBarFill = grass.starchCapacity > 0f ? grass.starchStored / grass.starchCapacity : 0f;
+        text.Append("  Starch: ").Append(CreateBar(starchBarFill, 12)).Append(' ')
+            .Append(grass.starchStored.ToString("F1")).Append(" / ").Append(grass.starchCapacity.ToString("F0"))
+            .Append(Colored(MUTED_COLOR, " (storage can grow to " + starchMax.ToString("F0") + ")")).Append('\n');
         if (grassManager != null)
         {
-            float carbonCapacity = grassManager.carbonPerSize * grass.grassDensity;
-            text.Append("  Biomass carbon: ").Append(grass.carbon.ToString("F2")).Append(" / ").Append(carbonCapacity.ToString("F2"))
-                .Append(Colored(MUTED_COLOR, " (taken from the air by photosynthesis, returned by respiration and decay)")).Append('\n');
+            text.Append("  Structural carbon: ").Append(grass.structuralCarbon.ToString("F2"))
+                .Append(Colored(MUTED_COLOR, " (all carbon in the plant; respiration releases it)")).Append('\n');
+            text.Append("  Available carbon: ").Append(grass.availableCarbon.ToString("F2"))
+                .Append(Colored(MUTED_COLOR, " (budget for growth, storage and seeds)")).Append('\n');
         }
 
         List<string> warnings = CollectWarnings(grass, envData, budget, factors);
@@ -775,8 +779,13 @@ public class DetailedInformationPanelController : MonoBehaviour
                 .Append(co2Note).Append('\n');
         }
 
+        if (factors.starchMultiplier < 0.999f)
+        {
+            text.Append("  Starch nearly full -> x").Append(factors.starchMultiplier.ToString("F2")).Append(" slowed").Append('\n');
+        }
+
         text.Append("  Weakest: ").Append(weakest).Append(' ').Append(FormatScore(weakestScore)).Append('\n');
-        text.Append("  ").Append(Colored(MUTED_COLOR, "Photosynthesis = 2 x water x temp x light x CO2 x size")).Append('\n');
+        text.Append("  ").Append(Colored(MUTED_COLOR, "Photosynthesis = 2 x water x temp x light x CO2 x starch x size")).Append('\n');
         text.Append("  ").Append(Colored(MUTED_COLOR, "Oxygen " + FormatPercent(envData.oxygen) + " (fuels night respiration) · Radiation "
             + envData.radiation.ToString("F2") + " (drives mutation)")).Append('\n');
     }
@@ -794,15 +803,24 @@ public class DetailedInformationPanelController : MonoBehaviour
     {
         int genes = grass.genome.expressedLocusCount;
         AppendFlow(text, '+', "Photosynthesis", budget.photosynthesis, budget.photosynthesisOn ? null : PhotosynthesisOffReason(grass, envData), null);
-        AppendFlow(text, '+', "Respiration", budget.respiration, budget.respirationOn ? null : RespirationOffReason(grass, envData), "burns tile oxygen");
+        AppendFlow(text, '+', "Respiration", budget.respiration, budget.respirationOn ? null : RespirationOffReason(grass, envData), "burns starch and oxygen");
         AppendFlow(text, '-', "Gene upkeep", budget.geneUpkeep, null, genes + " genes");
         AppendFlow(text, '-', "Ageing", budget.ageing, null, null);
-        AppendFlow(text, '-', "Growth", budget.growth, grass.IsDormant ? "dormant" : grass.grassDensity >= 1f ? "full size" : null, null);
+        AppendFlow(text, '-', "Growth", budget.growth, grass.IsDormant ? "dormant" : grass.grassDensity >= 1f ? "full size" : !grass.HasEnergyToGrow ? "energy too low" : grass.availableCarbon <= 0f ? "no available carbon" : null, null);
         if (grass.IsSeeding)
         {
-            AppendFlow(text, '-', "Seed provisioning", budget.seedProvisioning, grass.IsDormant ? "dormant" : null, null);
+            AppendFlow(text, '-', "Seed provisioning", budget.seedProvisioning, grass.IsDormant ? "dormant" : grass.availableCarbon <= 0f ? "no available carbon" : null, null);
         }
-        text.Append("  = <b>Net ").Append(FormatSigned(budget.Net)).Append("/s</b>\n");
+        if (budget.storageDevelopment > 0f)
+        {
+            AppendFlow(text, '-', "Storage development", budget.storageDevelopment, null, null);
+        }
+        text.Append("  = <b>Net ").Append(FormatSigned(budget.Net)).Append("/s</b>");
+        if (grass.energyStored >= grass.EnergyCapacity && budget.Net > 0f)
+        {
+            text.Append(Colored(MUTED_COLOR, grass.starchStored < grass.starchCapacity ? " (surplus goes to starch)" : " (surplus has nowhere to go)"));
+        }
+        text.Append('\n');
 
         if (grass.nightEffect < 0.999f)
         {
@@ -829,7 +847,6 @@ public class DetailedInformationPanelController : MonoBehaviour
     private static string PhotosynthesisOffReason(GrassInstance grass, EnvironmentData envData)
     {
         if (grass.IsDormant) return "dormant";
-        if (grass.energyStored >= grass.EnergyCapacity) return "energy full";
         if (envData.light <= LIGHT_ACTIVITY_THRESHOLD) return "dark";
         return "inactive";
     }
@@ -839,6 +856,7 @@ public class DetailedInformationPanelController : MonoBehaviour
         if (grass.IsDormant) return "dormant";
         if (grass.energyStored >= grass.EnergyCapacity) return "energy full";
         if (envData.light > LIGHT_ACTIVITY_THRESHOLD) return "daytime; night only";
+        if (grass.starchStored <= 0f) return "no starch";
         return "only below " + grass.ScaledEnergyThreshold(grass.genome.GetTraitValue(TraitId.RespirationTrigger)).ToString("F0") + " energy";
     }
 

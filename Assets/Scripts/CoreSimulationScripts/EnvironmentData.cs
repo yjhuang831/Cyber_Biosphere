@@ -13,9 +13,7 @@ public class EnvironmentData
 
     // Biogeochemical pools. Double precision: they receive tiny increments (~1e-5) on values of 10-100,
     // which float would round away. Carbon cycles through plants; N/P/K are not consumed by grass yet.
-    public double soilOrganicCarbon;
-    public double dissolvedCarbon;
-    public double litterCarbon;     // Decay pool: carbon from dead/shrinking plants, slowly released into soilOrganicCarbon
+    public double litterCarbon;     // Decay pool: carbon from dead plants, slowly released to the air
     public double availableNitrogen;
     public double availablePhosphorus;
     public double availablePotassium;

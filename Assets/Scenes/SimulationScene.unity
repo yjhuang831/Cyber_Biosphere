@@ -8817,10 +8817,15 @@ MonoBehaviour:
   seasonManager: {fileID: 1064579893}
   metabolismCostPerAllele: 0.01
   plantAging: 1
-  agingRate: 0.1
+  agingRate: 0.05
   baseGrowthCost: 0.5
   flowerLimit: 1
   maxCloneAttemptsPerDay: 0
+  maxBreedingDistance: 0.4
+  quickStartGrassFraction: 0.02
+  carbonPerEnergy: 0.01
+  respirationCarbonPerEnergy: 0.02
+  carbonPerSize: 10
 --- !u!114 &876398465
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -8884,6 +8889,7 @@ MonoBehaviour:
   - {fileID: 11400000, guid: 381b4ec7703efc442a289d6d89aa9ba6, type: 2}
   - {fileID: 11400000, guid: 343b4ceb335b45cfb2969ab991a4cffd, type: 2}
   - {fileID: 11400000, guid: fae69e81447c4cb082ca7448cda35bc8, type: 2}
+  - {fileID: 11400000, guid: 40b49608d33a42a68f8d11b08e2df6a9, type: 2}
 --- !u!114 &876398468
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -10172,7 +10178,10 @@ MonoBehaviour:
   landPotassium: 40
   waterPotassium: 16
   atmosphericCarbon: 0
-  carbonDecompositionRate: 0.00001
+  referenceAtmosphericCarbonPerTile: 20
+  co2HalfSaturationFraction: 0.5
+  litterDecayRate: 0.0005
+  carbonDecompositionRate: 0.00003
   aquaticCarbonUptakeRate: 0.00001
   carbonSedimentationRate: 0.000001
   nitrogenDepositionRate: 0.00001
@@ -10217,6 +10226,10 @@ MonoBehaviour:
   oxygenGradient:
   - {r: 0.8872695, g: 0, b: 1, a: 1}
   - {r: 0, g: 1, b: 0.99489236, a: 1}
+  carbonGradient:
+  - {r: 0.95, g: 0.93, b: 0.8, a: 1}
+  - {r: 0.3, g: 0.18, b: 0.05, a: 1}
+  carbonOverlayMax: 50
   temperatureSliderGroup: {fileID: 297884302}
   hydrationSliderGroup: {fileID: 137817487}
   radiationSliderGroup: {fileID: 989015961}

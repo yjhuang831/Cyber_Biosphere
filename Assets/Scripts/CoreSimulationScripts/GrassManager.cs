@@ -14,7 +14,7 @@ public class GrassManager : MonoBehaviour
     [Header("Plant Factors")]
     public float metabolismCostPerAllele = 0.01f;
     public bool plantAging = true;
-    public float agingRate = 0.1f; // Rate at which grass ages, affecting energy and density over time
+    public float agingRate = 0.05f; // Rate at which grass ages, affecting energy and density over time
     public float baseGrowthCost = 0.5f; // Energy cost per metabolic cycle for density growth
     public int flowerLimit = 1; // Max flowering events per month to prevent over-flowering and encourage diversity
     [Tooltip("Clone attempts each plant may make per sim day. 0 = unlimited (one attempt per plant update, the original behaviour).")]
@@ -30,11 +30,10 @@ public class GrassManager : MonoBehaviour
     [Range(0f, 1f)] public float quickStartGrassFraction = 0.02f;
 
     [Header("Plant Carbon")]
-    [Tooltip("Carbon fixed per unit of photosynthesis energy, and released per unit of energy respired (upkeep, ageing, night respiration).")]
+    [Tooltip("Carbon fixed per unit of energy photosynthesis stores, and available carbon spent per unit of energy on growth, storage, or seeds.")]
     [Min(0f)] public float carbonPerEnergy = 0.01f;
-    [Tooltip("Biomass carbon a plant holds at full size (scales with size). Compare referenceAtmosphericCarbonPerTile on EnvironmentManager: " +
-             "a fully vegetated map locks up about this much per tile.")]
-    [Min(0f)] public float carbonPerSize = 10f;
+    [Tooltip("Carbon released per unit of starch respired. Higher than carbonPerEnergy, so respiration returns carbon faster than photosynthesis takes it in.")]
+    [Min(0f)] public float respirationCarbonPerEnergy = 0.02f;
 
     // Collection of active grass instances for individual updates
     internal Dictionary<Vector3Int, GrassInstance> activeGrassInstances = new Dictionary<Vector3Int, GrassInstance>();
@@ -63,7 +62,7 @@ public class GrassManager : MonoBehaviour
             environment = environmentManager,
             co2Factor = environmentManager != null ? environmentManager.GetCO2PhotosynthesisFactor() : 1f,
             carbonPerEnergy = carbonPerEnergy,
-            carbonPerSize = carbonPerSize
+            respirationCarbonPerEnergy = respirationCarbonPerEnergy
         };
 
         using (var pooled = GetPooledPositions())
@@ -211,14 +210,15 @@ public class GrassManager : MonoBehaviour
     }
 
     /// <summary>
-    /// A dead plant's biomass carbon goes into its tile's decay pool (see EnvironmentManager.litterDecayRate).
+    /// A dead plant's carbon goes into its tile's decay pool (see EnvironmentManager.litterDecayRate).
     /// </summary>
     private void ReturnCarbonToLitter(GrassInstance grass, EnvironmentData tile)
     {
-        if (grass == null || grass.carbon <= 0f || environmentManager == null)
+        if (grass == null || environmentManager == null)
             return;
-        environmentManager.AddLitter(tile, grass.carbon);
-        grass.carbon = 0f;
+        environmentManager.AddLitter(tile, grass.structuralCarbon);
+        grass.structuralCarbon = 0f;
+        grass.availableCarbon = 0f;
     }
 
     internal void SpawnNewGrass(EnvironmentData targetData, Vector3Int gridposition, PlantGenome genome = null, float iniEnergy = 0f, string parentGenus = null, BirthCause cause = BirthCause.Player)

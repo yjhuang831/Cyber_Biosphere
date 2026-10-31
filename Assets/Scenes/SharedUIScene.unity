@@ -235,7 +235,7 @@ MonoBehaviour:
   agingRateSlider: {fileID: 401343916}
   agingRateValueText: {fileID: 1104062056}
   agingRateScalar: 0.05
-  agingRate: 0.1
+  agingRate: 0.05
   metabolismCostPerAlleleSlider: {fileID: 1177350015}
   metabolismCostPerAlleleValueText: {fileID: 2028883353}
   metabolismCostPerAlleleScalar: 0.005

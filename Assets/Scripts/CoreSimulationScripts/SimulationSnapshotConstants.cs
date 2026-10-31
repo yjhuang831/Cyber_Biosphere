@@ -3,7 +3,7 @@ using System.Collections.Generic;
 
 internal static class SimulationSnapshotConstants
 {
-    public const int SchemaVersion = 11;
+    public const int SchemaVersion = 14;
     public const int MinimumSupportedSchemaVersion = 6;
     public const string AutosaveFolder = "Autosaves";
     public const string ManualSaveFolder = "ManualSaves";
@@ -110,8 +110,6 @@ internal class TileState
     public int y;
     public bool isWater;
     public float oxygen;
-    public double soilOrganicCarbon;
-    public double dissolvedCarbon;
     public double litterCarbon;   // Schema 9+: decay pool
     public double availableNitrogen;
     public double availablePhosphorus;
@@ -140,7 +138,10 @@ internal class GrassState
     public float maturityThreshold;
     public float seedingEnergy;
     public float nightEffect = 1f;
-    public float carbon;                // Schema 9+: biomass carbon
+    public float structuralCarbon;      // Schema 13+
+    public float availableCarbon;       // Budget within structuralCarbon, not additional carbon
+    public float starchCapacity;        // Schema 12+
+    public float starchStored;
     public long lastCloneDay = -1;
     public int cloneAttemptsToday;
     public float ageingExposureToday;   // Today's time-based ageing/dormancy accounting so far

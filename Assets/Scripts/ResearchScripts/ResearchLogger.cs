@@ -185,13 +185,13 @@ internal class ResearchLogger
         AddSeedStats(summary);
         AddGenusStats(summary);
         AddEnvironmentStats(summary);
-        summary.totalCarbon = summary.atmosphericCarbon + summary.plantCarbon + summary.litterCarbon + summary.soilCarbon + summary.dissolvedCarbon;
+        summary.totalCarbon = summary.atmosphericCarbon + summary.structuralCarbon + summary.litterCarbon;
         return summary;
     }
 
     private void AddPlantStats(DailySummary summary)
     {
-        double energy = 0, density = 0, age = 0, generation = 0, loci = 0, capacity = 0;
+        double energy = 0, density = 0, age = 0, generation = 0, loci = 0, capacity = 0, starchCapacity = 0, starchStored = 0;
         Dictionary<string, LineageCount> lineages = new Dictionary<string, LineageCount>();
 
         foreach (GrassInstance grass in grassManager.activeGrassInstances.Values)
@@ -207,7 +207,10 @@ internal class ResearchLogger
 
             energy += grass.energyStored;
             capacity += grass.EnergyCapacity;
-            summary.plantCarbon += grass.carbon;
+            starchCapacity += grass.starchCapacity;
+            starchStored += grass.starchStored;
+            summary.structuralCarbon += grass.structuralCarbon;
+            summary.availableCarbon += grass.availableCarbon;
             density += grass.grassDensity;
             age += grass.age;
             generation += grass.genome.generation;
@@ -234,6 +237,8 @@ internal class ResearchLogger
         {
             summary.meanEnergy = (float)(energy / summary.plants);
             summary.meanEnergyCapacity = (float)(capacity / summary.plants);
+            summary.meanStarchCapacity = (float)(starchCapacity / summary.plants);
+            summary.meanStarchStored = (float)(starchStored / summary.plants);
             summary.meanDensity = (float)(density / summary.plants);
             summary.meanAgeDays = (float)(age / summary.plants);
             summary.meanGeneration = (float)(generation / summary.plants);
@@ -302,20 +307,17 @@ internal class ResearchLogger
             return;
 
         double landTemp = 0, waterTemp = 0, landHydration = 0, landOxygen = 0, waterOxygen = 0;
-        double landSoilCarbon = 0, landN = 0, landP = 0, landK = 0, waterDissolvedCarbon = 0, waterN = 0, waterP = 0, waterK = 0;
+        double landN = 0, landP = 0, landK = 0, waterN = 0, waterP = 0, waterK = 0;
 
         foreach (Vector3Int pos in mapManager.GetAllTilePositions())
         {
             EnvironmentData data = mapManager.GetTileEnvironmentData(pos);
-            summary.soilCarbon += data.soilOrganicCarbon;
-            summary.dissolvedCarbon += data.dissolvedCarbon;
             summary.litterCarbon += data.litterCarbon;
             if (data.isWater)
             {
                 summary.waterTiles++;
                 waterTemp += data.temperature;
                 waterOxygen += data.oxygen;
-                waterDissolvedCarbon += data.dissolvedCarbon;
                 waterN += data.availableNitrogen;
                 waterP += data.availablePhosphorus;
                 waterK += data.availablePotassium;
@@ -326,7 +328,6 @@ internal class ResearchLogger
                 landTemp += data.temperature;
                 landHydration += data.hydration;
                 landOxygen += data.oxygen;
-                landSoilCarbon += data.soilOrganicCarbon;
                 landN += data.availableNitrogen;
                 landP += data.availablePhosphorus;
                 landK += data.availablePotassium;
@@ -339,7 +340,6 @@ internal class ResearchLogger
             summary.landMeanTemperature = (float)(landTemp / n);
             summary.landMeanHydration = (float)(landHydration / n);
             summary.landMeanOxygen = (float)(landOxygen / n);
-            summary.landMeanSoilOrganicCarbon = (float)(landSoilCarbon / n);
             summary.landMeanNitrogen = (float)(landN / n);
             summary.landMeanPhosphorus = (float)(landP / n);
             summary.landMeanPotassium = (float)(landK / n);
@@ -349,7 +349,6 @@ internal class ResearchLogger
             float n = summary.waterTiles;
             summary.waterMeanTemperature = (float)(waterTemp / n);
             summary.waterMeanOxygen = (float)(waterOxygen / n);
-            summary.waterMeanDissolvedCarbon = (float)(waterDissolvedCarbon / n);
             summary.waterMeanNitrogen = (float)(waterN / n);
             summary.waterMeanPhosphorus = (float)(waterP / n);
             summary.waterMeanPotassium = (float)(waterK / n);
@@ -524,26 +523,25 @@ internal class DailySummary
     public float landMeanTemperature;
     public float landMeanHydration;
     public float landMeanOxygen;
-    public float landMeanSoilOrganicCarbon;
     public float landMeanNitrogen;
     public float landMeanPhosphorus;
     public float landMeanPotassium;
     public float waterMeanTemperature;
     public float waterMeanOxygen;
-    public float waterMeanDissolvedCarbon;
     public float waterMeanNitrogen;
     public float waterMeanPhosphorus;
     public float waterMeanPotassium;
 
     // Carbon budget (map totals). totalCarbon should only change when the map is reseeded; drift means a bug.
     public double atmosphericCarbon;
-    public double plantCarbon;
+    public double structuralCarbon;
+    public double availableCarbon;      // Budget within structuralCarbon; not part of totalCarbon
     public double litterCarbon;
-    public double soilCarbon;
-    public double dissolvedCarbon;
     public double totalCarbon;
     public float co2PhotosynthesisFactor;
     public float meanEnergyCapacity;
+    public float meanStarchCapacity;
+    public float meanStarchStored;
 
     public DailyEventCounts events;
 }

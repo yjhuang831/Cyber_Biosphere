@@ -349,8 +349,6 @@ public static class SimulationLoadSystem
                 env.oxygen = tileState.oxygen;
                 if (snapshot.schemaVersion >= 7)
                 {
-                    env.soilOrganicCarbon = Math.Max(0.0, tileState.soilOrganicCarbon);
-                    env.dissolvedCarbon = Math.Max(0.0, tileState.dissolvedCarbon);
                     env.availableNitrogen = Math.Max(0.0, tileState.availableNitrogen);
                     env.availablePhosphorus = Math.Max(0.0, tileState.availablePhosphorus);
                     env.availablePotassium = Math.Max(0.0, tileState.availablePotassium);
@@ -542,7 +540,10 @@ public static class SimulationLoadSystem
         grass.maturityThreshold = source.maturityThreshold;
         grass.seedingEnergy = source.seedingEnergy;
         grass.nightEffect = source.nightEffect > 0f ? source.nightEffect : 1f;
-        grass.carbon = Mathf.Max(0f, source.carbon); // 0 for pre-schema-9 saves; refilled by photosynthesis
+        grass.structuralCarbon = Mathf.Max(0f, source.structuralCarbon);
+        grass.availableCarbon = Mathf.Max(0f, source.availableCarbon);
+        grass.starchCapacity = Mathf.Max(0f, source.starchCapacity); // 0 for pre-schema-12 saves; redeveloped after load
+        grass.starchStored = Mathf.Clamp(source.starchStored, 0f, grass.starchCapacity);
         grass.lastCloneDay = source.lastCloneDay;
         grass.cloneAttemptsToday = Mathf.Max(0, source.cloneAttemptsToday);
         grass.ageingExposureToday = Mathf.Max(0f, source.ageingExposureToday);

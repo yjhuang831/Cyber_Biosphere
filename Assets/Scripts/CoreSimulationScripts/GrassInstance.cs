@@ -32,7 +32,13 @@ public class GrassInstance
     internal float daylightSampleTime = 0f;    // Daylight sim seconds sampled today
     internal long lastCloneDay = -1;       // Sim day of the most recent clone attempt
     internal int cloneAttemptsToday = 0;   // Clone attempts on lastCloneDay
-    internal float carbon = 0f;            // Biomass carbon (map carbon units); fixed from / respired to the atmosphere
+    // structuralCarbon is all the carbon the plant holds: photosynthesis adds to it, respiration releases it, and it goes to
+    // litter at death. availableCarbon is an internal budget within that total, not extra carbon: photosynthesis
+    // adds to it and building spends it (the carbon stays in the plant), so only structuralCarbon counts towards map totals.
+    internal float structuralCarbon = 0f;
+    internal float availableCarbon = 0f;
+    internal float starchCapacity = 0f;    // Storage developed so far; grows after maturity, up to MaxStarchCapacity
+    internal float starchStored = 0f;      // Energy held as starch: filled by surplus photosynthesis, spent by respiration
 
     // ---- Energy storage, scaled by size ----
     internal const float MAX_ENERGY_CAPACITY = 100f;        // Capacity at full size; energy thresholds (traits) are written against this
@@ -53,6 +59,52 @@ public class GrassInstance
         return traitThreshold * EnergyCapacity / MAX_ENERGY_CAPACITY;
     }
 
+    // ---- Starch storage ----
+    private const float DEFAULT_MAX_STARCH = 10f;      // Without the trait's gene (or the trait in the database)
+    private const float RESPIRATION_OXYGEN_PER_ENERGY = 0.1f; // Tile oxygen used per unit of energy respired
+    private const float STARCH_DEVELOP_ENERGY = 95f;   // Storage develops, and sugar backs up, above this energy (0-100 scale)
+    private const float STARCH_FEEDBACK_START = 0.5f;  // Starch fill level where photosynthesis begins to slow
+    private const float STARCH_FEEDBACK_MIN = 0.25f;   // Photosynthesis multiplier with storage completely full
+
+    // Growth runs only on surplus energy (0-100 scale). Young plants have no starch, so they must reach dusk with
+    // full energy to survive the night; without this floor growth spends it all and seedlings starve overnight.
+    private const float GROWTH_MIN_ENERGY = 85f;
+
+    internal bool HasEnergyToGrow => energyStored > ScaledEnergyThreshold(GROWTH_MIN_ENERGY);
+
+    internal float MaxStarchCapacity
+    {
+        get
+        {
+            float trait = genome.GetTraitValue(TraitId.StarchStorage);
+            return trait > 0f ? trait : DEFAULT_MAX_STARCH;
+        }
+    }
+
+    /// <summary>
+    /// Photosynthesis slows as storage fills, but only while energy is near full (sugar backing up with nowhere to go).
+    /// A plant low on energy can't draw on starch by day, so it keeps photosynthesising at full speed.
+    /// </summary>
+    internal float StarchPhotosynthesisMultiplier
+    {
+        get
+        {
+            if (starchCapacity <= 0f || energyStored < ScaledEnergyThreshold(STARCH_DEVELOP_ENERGY))
+                return 1f;
+
+            float fill = starchStored / starchCapacity;
+            if (fill <= STARCH_FEEDBACK_START)
+                return 1f;
+            return Mathf.Lerp(1f, STARCH_FEEDBACK_MIN, (fill - STARCH_FEEDBACK_START) / (1f - STARCH_FEEDBACK_START));
+        }
+    }
+
+    private bool CanDevelopStarchStorage =>
+        !IsDormant
+        && grassDensity >= maturityThreshold
+        && starchCapacity < MaxStarchCapacity
+        && energyStored > ScaledEnergyThreshold(STARCH_DEVELOP_ENERGY);
+
     /// <summary>
     /// Settings for a plant's carbon exchange with the atmosphere, supplied by GrassManager each update.
     /// </summary>
@@ -60,8 +112,8 @@ public class GrassInstance
     {
         public EnvironmentManager environment; // Atmosphere and decay pool (null disables carbon accounting)
         public float co2Factor;                // Photosynthesis multiplier from atmospheric CO2
-        public float carbonPerEnergy;          // Carbon fixed per unit of photosynthesis energy, and released per unit respired
-        public float carbonPerSize;            // Biomass carbon a plant can hold at full size; scales with size
+        public float carbonPerEnergy;          // Carbon fixed per unit of energy photosynthesis stores, and needed per unit of energy spent on building
+        public float respirationCarbonPerEnergy; // Carbon released per unit of starch respired
     }
     
     // [OPTIMIZED] Cached plant type for performance (never changes per genome)
@@ -126,7 +178,8 @@ public class GrassInstance
         public float temperatureMultiplier; // 0..1.5, see TemperatureMultiplier
         public float basePotential;         // 2 × water × temperature, before light, CO2 and size; compared with DormancyTrigger
         public float co2Multiplier;         // From atmospheric CO2 (1 at the reference level)
-        public float rate;                  // Energy per sim second at the current light, CO2 and size
+        public float starchMultiplier;      // Slowdown from full starch storage (1 = none)
+        public float rate;                  // Energy per sim second at the current light, CO2, starch and size
     }
 
     /// <summary>
@@ -162,7 +215,8 @@ public class GrassInstance
 
         factors.basePotential = 2f * factors.hydrationEfficiency * factors.temperatureMultiplier;
         factors.co2Multiplier = co2Factor;
-        factors.rate = factors.basePotential * factors.lightEfficiency * co2Factor * grassDensity;
+        factors.starchMultiplier = StarchPhotosynthesisMultiplier;
+        factors.rate = factors.basePotential * factors.lightEfficiency * co2Factor * factors.starchMultiplier * grassDensity;
         return factors;
     }
 
@@ -246,8 +300,9 @@ public class GrassInstance
         public float ageing;
         public float growth;
         public float seedProvisioning;
+        public float storageDevelopment;
         public float Gains => photosynthesis + respiration;
-        public float Costs => geneUpkeep + ageing + growth + seedProvisioning;
+        public float Costs => geneUpkeep + ageing + growth + seedProvisioning + storageDevelopment;
         public float Net => Gains - Costs;
     }
 
@@ -255,14 +310,14 @@ public class GrassInstance
     {
         EnergyBudget budget = new EnergyBudget();
 
-        if (energyStored < EnergyCapacity && !IsDormant)
+        if (!IsDormant)
         {
             if (eData.light > 0.01f)
             {
                 budget.photosynthesisOn = true;
                 budget.photosynthesis = CalculatePhotosynthesis(eData, co2Factor).rate;
             }
-            else if (energyStored < ScaledEnergyThreshold(genome.GetTraitValue(TraitId.RespirationTrigger)))
+            else if (CanRespire)
             {
                 budget.respirationOn = true;
                 budget.respiration = CalculateRespirationRate(eData);
@@ -279,13 +334,18 @@ public class GrassInstance
             growthExpense += 0.1f * Mathf.Cos(grassDensity * Mathf.PI) + 0.1f;
         }
         float seedingProportion = genome.GetTraitValue(TraitId.SeedingProportion);
-        if (!IsDormant && grassDensity < 1f)
+        bool hasCarbon = availableCarbon > 0f;
+        if (!IsDormant && grassDensity < 1f && HasEnergyToGrow && hasCarbon)
         {
             budget.growth = IsSeeding ? growthExpense * (1 - seedingProportion) : growthExpense;
         }
-        if (!IsDormant && IsSeeding)
+        if (!IsDormant && IsSeeding && hasCarbon)
         {
             budget.seedProvisioning = growthExpense * seedingProportion;
+        }
+        if (CanDevelopStarchStorage && hasCarbon)
+        {
+            budget.storageDevelopment = Mathf.Min(growthExpense, MaxStarchCapacity - starchCapacity);
         }
 
         return budget;
@@ -307,16 +367,21 @@ public class GrassInstance
         return Mathf.Clamp(TEMPERATURE_PEAK_MULTIPLIER - Mathf.Abs(tempDifference) * falloffPerDegree, 0f, TEMPERATURE_PEAK_MULTIPLIER);
     }
 
+    private bool CanRespire =>
+        starchStored > 0f
+        && energyStored < EnergyCapacity
+        && energyStored < ScaledEnergyThreshold(genome.GetTraitValue(TraitId.RespirationTrigger));
+
+    /// <summary>
+    /// Burns starch with tile oxygen to make energy. Returns the energy made this update.
+    /// </summary>
     private float Respiration(EnvironmentData environmentData, float time)
     {
-        float energyGenerated = 0f;
-        float oxygenConsumption = CalculateRespirationRate(environmentData); // Base oxygen consumption for respiration
-
-        energyGenerated += oxygenConsumption;
-        environmentData.oxygen -= oxygenConsumption * time; // Reduce oxygen based on consumption and time
+        float energy = Mathf.Min(CalculateRespirationRate(environmentData) * time, starchStored, EnergyCapacity - energyStored);
+        starchStored -= energy;
+        environmentData.oxygen -= energy * RESPIRATION_OXYGEN_PER_ENERGY;
         environmentData.oxygen = Mathf.Clamp(environmentData.oxygen, 0f, 100f);
-
-        return energyGenerated;
+        return energy;
     }
 
     /// <summary>
@@ -325,13 +390,11 @@ public class GrassInstance
     /// </summary>
     internal void PerformMetabolism(EnvironmentData eData, float metabolismCostPerAllele, float time, float baseGrowthCost, bool isNight, PlantCarbonContext carbonContext)
     {
-        float energyGain = 0f;
         usedPhotosynthesisLastTick = false;
         usedRespirationLastTick = false;
 
         // [OPTIMIZED] Cache trait lookups for frequently accessed values to reduce repeated GetTraitValue() calls
         float nightGrowthEfficiency = genome.GetTraitValue(TraitId.NightGrowthEfficiency);
-        float respirationTrigger = genome.GetTraitValue(TraitId.RespirationTrigger);
         float seedingProportion = genome.GetTraitValue(TraitId.SeedingProportion);
         float growthRate = genome.GetTraitValue(TraitId.GrowthRate);
 
@@ -364,40 +427,31 @@ public class GrassInstance
 
         float photosynthesisEnergy = 0f;
         float respirationEnergy = 0f;
-        if (energyStored < EnergyCapacity && !IsDormant)
+        if (!IsDormant)
         {
             if (isDaylight)
             {
-                energyGain += factors.rate;
                 usedPhotosynthesisLastTick = true;
+                photosynthesisEnergy = StorePhotosynthesis(factors.rate * time);
                 if (eData.oxygen < 100f)
                 {
-                    eData.oxygen += energyGain * time * 2f; // Increase oxygen based on energy generated and time
+                    eData.oxygen += photosynthesisEnergy * 2f; // Increase oxygen based on energy generated
                     eData.oxygen = Mathf.Clamp(eData.oxygen, 0f, 100f);
                 }
             }
-            // [OPTIMIZED] Use cached respirationTrigger instead of repeated GetTraitValue() call
-            else if (energyStored < ScaledEnergyThreshold(respirationTrigger))
+            else if (CanRespire)
             {
-                energyGain += Respiration(eData, time);
+                respirationEnergy = Respiration(eData, time);
+                energyStored += respirationEnergy;
                 usedRespirationLastTick = true;
             }
-
-            // Gains stop at the size-scaled capacity; energy already above it (seed reserves) is not taken away
-            float added = Mathf.Min(energyGain * time, EnergyCapacity - energyStored);
-            energyStored += added;
-            if (usedPhotosynthesisLastTick)
-                photosynthesisEnergy = added;
-            else
-                respirationEnergy = added;
         }
 
         // [OPTIMIZED] Compute metabolism cost inline to avoid method call overhead
         float actualMetabolismCost = (metabolismCostPerAllele * genome.expressedLocusCount + ageEffect) * dormancyEffect * nightEffect;
-        float maintenanceEnergy = actualMetabolismCost * grassDensity * time;
-        energyStored -= maintenanceEnergy;
+        energyStored -= actualMetabolismCost * grassDensity * time;
 
-        ExchangeCarbon(carbonContext, photosynthesisEnergy, maintenanceEnergy + respirationEnergy);
+        ExchangeCarbon(carbonContext, photosynthesisEnergy, respirationEnergy);
 
         // [OPTIMIZED] Compute growth expense inline
         float growthExpense = baseGrowthCost * grassDensity * nightEffect * time;
@@ -406,7 +460,7 @@ public class GrassInstance
             growthExpense += (0.1f * Mathf.Cos(grassDensity * Mathf.PI) + 0.1f) * time;
         }
         // Update grass density if not at maximum
-        if (!IsDormant && grassDensity < 1f)
+        if (!IsDormant && grassDensity < 1f && HasEnergyToGrow)
         {
             float densityGrowthCost = growthExpense;
             if (IsSeeding)
@@ -416,13 +470,16 @@ public class GrassInstance
                 densityGrowthCost *= (1 - seedingProportion); // Adjust energy cost by seeding proportion
             }
 
-            energyStored -= densityGrowthCost;
-            // [OPTIMIZED] Use cached growthRate instead of repeated GetTraitValue() call
-            // Update grass density based on energy cost
-            grassDensity += densityGrowthCost * growthRate * 0.01f;
-            grassDensity = Mathf.Clamp01(grassDensity);
+            if (TrySpendCarbon(densityGrowthCost, carbonContext))
+            {
+                energyStored -= densityGrowthCost;
+                // [OPTIMIZED] Use cached growthRate instead of repeated GetTraitValue() call
+                // Update grass density based on energy cost
+                grassDensity += densityGrowthCost * growthRate * 0.01f;
+                grassDensity = Mathf.Clamp01(grassDensity);
 
-            maxDormantTime = Mathf.RoundToInt(Mathf.Clamp(grassDensity * SeasonManager.daysPerYear, 0.5f * SeasonManager.daysPerYear, SeasonManager.daysPerYear));
+                maxDormantTime = Mathf.RoundToInt(Mathf.Clamp(grassDensity * SeasonManager.daysPerYear, 0.5f * SeasonManager.daysPerYear, SeasonManager.daysPerYear));
+            }
         }
 
         if (!IsDormant && IsSeeding)
@@ -430,8 +487,22 @@ public class GrassInstance
             // [OPTIMIZED] Use cached seedingProportion instead of repeated GetTraitValue() call
             float seedCost = growthExpense * seedingProportion;
 
-            energyStored -= seedCost;
-            seedingEnergy += seedCost;
+            if (TrySpendCarbon(seedCost, carbonContext))
+            {
+                energyStored -= seedCost;
+                seedingEnergy += seedCost;
+            }
+        }
+
+        if (CanDevelopStarchStorage)
+        {
+            // Paid from the same budget as seeds; one unit of energy builds room for one unit of starch
+            float storageCost = Mathf.Min(growthExpense, MaxStarchCapacity - starchCapacity);
+            if (TrySpendCarbon(storageCost, carbonContext))
+            {
+                energyStored -= storageCost;
+                starchCapacity += storageCost;
+            }
         }
 
         if (energyStored < 5f && age > 1)
@@ -446,51 +517,72 @@ public class GrassInstance
             grassDensity -= 0.01f * time; // Wilting rate
             grassDensity = Mathf.Clamp01(grassDensity);
             energyStored = 5f;
-            ShedExcessCarbon(carbonContext, eData);
         }
         // Gains are capped at capacity above, so only the floor needs clamping here
         energyStored = Mathf.Max(energyStored, 0f);
     }
 
     /// <summary>
-    /// Photosynthesis fixes atmospheric CO2 into biomass, up to what the plant's size can hold (and what the atmosphere
-    /// has). Respiration - maintenance (gene upkeep, ageing) and night oxygen respiration - burns biomass back to CO2.
+    /// Fills energy first (up to the size-scaled capacity; energy already above it, like seed reserves, is kept) and
+    /// sends the overflow to starch. Returns the energy actually stored. Negative input (too much light) is a plain loss.
+    /// </summary>
+    private float StorePhotosynthesis(float gained)
+    {
+        if (gained <= 0f)
+        {
+            energyStored += gained;
+            return 0f;
+        }
+
+        float toEnergy = Mathf.Min(gained, Mathf.Max(0f, EnergyCapacity - energyStored));
+        float toStarch = Mathf.Min(gained - toEnergy, starchCapacity - starchStored);
+        energyStored += toEnergy;
+        starchStored += toStarch;
+        return toEnergy + toStarch;
+    }
+
+    /// <summary>
+    /// Photosynthesis fixes atmospheric CO2 into the plant, limited only by what the atmosphere has. Respiration releases
+    /// it, faster per unit of energy than photosynthesis takes it in, and takes the same amount from the budget if any is left.
     /// Carbon only moves between pools, so the map total is conserved.
     /// </summary>
-    private void ExchangeCarbon(PlantCarbonContext context, float photosynthesisEnergy, float respiredEnergy)
+    private void ExchangeCarbon(PlantCarbonContext context, float photosynthesisEnergy, float respirationEnergy)
     {
         if (context.environment == null)
             return;
 
-        float carbonCapacity = context.carbonPerSize * grassDensity;
-        if (photosynthesisEnergy > 0f && carbon < carbonCapacity)
+        if (photosynthesisEnergy > 0f)
         {
-            double wanted = System.Math.Min(photosynthesisEnergy * context.carbonPerEnergy, carbonCapacity - carbon);
-            carbon += (float)context.environment.TakeAtmosphericCarbon(wanted);
+            float fixedCarbon = (float)context.environment.TakeAtmosphericCarbon(photosynthesisEnergy * context.carbonPerEnergy);
+            structuralCarbon += fixedCarbon;
+            availableCarbon += fixedCarbon;
         }
 
-        float released = Mathf.Min(carbon, Mathf.Max(0f, respiredEnergy) * context.carbonPerEnergy);
+        float released = Mathf.Min(structuralCarbon, respirationEnergy * context.respirationCarbonPerEnergy);
         if (released > 0f)
         {
-            carbon -= released;
+            structuralCarbon -= released;
+            availableCarbon = Mathf.Max(0f, availableCarbon - released);
             context.environment.ReleaseAtmosphericCarbon(released);
         }
     }
 
     /// <summary>
-    /// A shrinking plant sheds biomass it can no longer hold into its tile's decay pool.
+    /// Everything a plant builds (growth, starch storage, seeds, and any future building) goes through here: it needs
+    /// enough available carbon for its energy cost and spends it. The carbon stays in the plant, so structuralCarbon
+    /// is unchanged. Returns false, spending nothing, if there isn't enough.
     /// </summary>
-    private void ShedExcessCarbon(PlantCarbonContext context, EnvironmentData tile)
+    private bool TrySpendCarbon(float energyCost, PlantCarbonContext context)
     {
         if (context.environment == null)
-            return;
+            return true;
 
-        float excess = carbon - context.carbonPerSize * grassDensity;
-        if (excess > 0f)
-        {
-            carbon -= excess;
-            context.environment.AddLitter(tile, excess);
-        }
+        float carbonCost = energyCost * context.carbonPerEnergy;
+        if (availableCarbon < carbonCost)
+            return false;
+
+        availableCarbon -= carbonCost;
+        return true;
     }
 
     /// <summary>

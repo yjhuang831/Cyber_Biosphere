@@ -41,7 +41,7 @@ public class SimulationSettingsPanelController : MonoBehaviour
     public Slider agingRateSlider;
     public TMP_Text agingRateValueText;
     public float agingRateScalar = 0.05f;
-    public float agingRate = 0.1f;
+    public float agingRate = 0.05f;
 
     public Slider metabolismCostPerAlleleSlider;
     public TMP_Text metabolismCostPerAlleleValueText;

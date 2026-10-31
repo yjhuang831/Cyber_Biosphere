@@ -96,7 +96,13 @@ Behavior:
   - Phase 2: rebuild map size/topology, restore environment settings (tile-level values are recalculated from them),
     plants, seeds, counters, time state, and the selected season.
 
-- Schema `11` (current): genera and binomial names. Genomes save `genusId`; `genera` lists each genus (id, name, library
+- Schema `14` (current): soil organic carbon removed; older saves load without it, and any carbon they held there is dropped.
+
+- Schema `13`: dissolved carbon removed; plants save `structuralCarbon` (all carbon in the plant) and `availableCarbon` (its internal budget, a subset) instead of `carbon`.
+
+- Schema `12`: plants save `starchCapacity` and `starchStored`; older saves start with no storage.
+
+- Schema `11`: genera and binomial names. Genomes save `genusId`; `genera` lists each genus (id, name, library
   flag, species list, parent, founding day, founder colour, representative genome indices). `nextGenusId` and
   `nextGenusNameIndex` continue the sequences. Older saves are grouped and named at the next dawn.
 
@@ -132,5 +138,5 @@ Behavior:
   - No longer stores per-tile caches for `temperature`, `hydration`, `light`, `radiation`.
   - Keeps per-tile `oxygen` so local oxygen state from grass/environment history is preserved.
   - No longer stores genome `phenotypes`; phenotypes are rebuilt from DNA on load.
-  - Adds map-level soil organic carbon and available N/P/K pools plus the atmospheric carbon reservoir.
-  - Loader supports schemas `6` to `11`; older schemas are rejected.
+  - Adds map-level available N/P/K pools plus the atmospheric carbon reservoir.
+  - Loader supports schemas `6` to `14`; older schemas are rejected.

@@ -11,10 +11,10 @@ public class EnvironmentVisualizer : MonoBehaviour
     public Color[] lightGradient;
     public Color[] radiationGradient;
     public Color[] oxygenGradient;
-    [Tooltip("Low -> high tile carbon (soil organic + dissolved + litter + plant biomass).")]
+    [Tooltip("Low -> high tile carbon (litter + plant).")]
     public Color[] carbonGradient = { new Color(0.95f, 0.93f, 0.80f), new Color(0.30f, 0.18f, 0.05f) };
     [Tooltip("Tile carbon shown at full gradient strength. Fixed (not per-frame max) so colours stay comparable over time.")]
-    [Min(0.01f)] public float carbonOverlayMax = 100f;
+    [Min(0.01f)] public float carbonOverlayMax = 50f;
 
     public GameObject temperatureSliderGroup;
     public GameObject hydrationSliderGroup;
@@ -65,7 +65,7 @@ public class EnvironmentVisualizer : MonoBehaviour
     }
 
     /// <summary>
-    /// Shows/hides the carbon overlay: each tile's soil organic, dissolved, litter and plant biomass carbon.
+    /// Shows/hides the carbon overlay: each tile's litter and plant carbon.
     /// Atmospheric carbon is a single map-wide pool, so it is shown in the tile info panel instead.
     /// </summary>
     public void ToggleCarbonVisualization()
@@ -152,8 +152,8 @@ public class EnvironmentVisualizer : MonoBehaviour
                 tileColor = BlendGradient(oxygenGradient, data.oxygen / 100f);
                 break;
             case "Carbon":
-                double tileCarbon = data.soilOrganicCarbon + data.dissolvedCarbon + data.litterCarbon
-                    + (data.grass != null ? data.grass.carbon : 0f);
+                double tileCarbon = data.litterCarbon
+                    + (data.grass != null ? data.grass.structuralCarbon : 0f);
                 tileColor = BlendGradient(carbonGradient, (float)(tileCarbon / carbonOverlayMax));
                 break;
             case "Genus":
