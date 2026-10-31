@@ -185,7 +185,7 @@ internal class ResearchLogger
         AddSeedStats(summary);
         AddGenusStats(summary);
         AddEnvironmentStats(summary);
-        summary.totalCarbon = summary.atmosphericCarbon + summary.structuralCarbon + summary.litterCarbon;
+        summary.totalCarbon = summary.atmosphericCarbon + summary.structuralCarbon + summary.litterCarbon + summary.seedCarbon;
         return summary;
     }
 
@@ -293,6 +293,7 @@ internal class ResearchLogger
             {
                 summary.seeds++;
                 seedEnergy += seeds[i].storedEnergy;
+                summary.seedCarbon += seeds[i].carbon;
             }
         }
         if (summary.seeds > 0)
@@ -537,6 +538,7 @@ internal class DailySummary
     public double structuralCarbon;
     public double availableCarbon;      // Budget within structuralCarbon; not part of totalCarbon
     public double litterCarbon;
+    public double seedCarbon;
     public double totalCarbon;
     public float co2PhotosynthesisFactor;
     public float meanEnergyCapacity;

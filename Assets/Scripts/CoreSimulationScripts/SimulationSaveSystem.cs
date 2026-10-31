@@ -346,6 +346,7 @@ public static class SimulationSaveSystem
             genomeIndex = genomeIndex,
             parentGenus = seed.parentGenus,
             storedEnergy = seed.storedEnergy,
+            carbon = seed.carbon,
             germinationEnergy = seed.germinationEnergy,
             germinationStage = seed.germinationStage,
             sproutStage = seed.sproutStage,

@@ -586,6 +586,39 @@ public class GrassInstance
     }
 
     /// <summary>
+    /// Adds carbon a new plant starts with (from its seed, parent, or the air): ready to build with, so a plant starting
+    /// with energy above its capacity can grow before photosynthesis has anywhere to store energy.
+    /// </summary>
+    internal void ReceiveCarbon(float carbon)
+    {
+        structuralCarbon += carbon;
+        availableCarbon += carbon;
+    }
+
+    /// <summary>
+    /// Removes up to the requested carbon for a clone, from the plant and its budget. Returns the amount removed.
+    /// </summary>
+    internal float TakeCarbon(float requested)
+    {
+        float taken = Mathf.Clamp(requested, 0f, structuralCarbon);
+        structuralCarbon -= taken;
+        availableCarbon = Mathf.Max(0f, availableCarbon - taken);
+        return taken;
+    }
+
+    /// <summary>
+    /// Removes the carbon built into seeds. The budget already paid for it while seeding (see TrySpendCarbon),
+    /// so only the plant's total drops. Returns the amount removed.
+    /// </summary>
+    internal float TakeSeedCarbon(float requested)
+    {
+        float taken = Mathf.Clamp(requested, 0f, structuralCarbon);
+        structuralCarbon -= taken;
+        availableCarbon = Mathf.Min(availableCarbon, structuralCarbon);
+        return taken;
+    }
+
+    /// <summary>
     /// Checks if the grass is still alive (has energy above minimum threshold).
     /// </summary>
     public bool IsAlive()

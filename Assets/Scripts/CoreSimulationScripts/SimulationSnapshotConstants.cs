@@ -3,7 +3,7 @@ using System.Collections.Generic;
 
 internal static class SimulationSnapshotConstants
 {
-    public const int SchemaVersion = 14;
+    public const int SchemaVersion = 15;
     public const int MinimumSupportedSchemaVersion = 6;
     public const string AutosaveFolder = "Autosaves";
     public const string ManualSaveFolder = "ManualSaves";
@@ -160,6 +160,7 @@ internal class SeedState
     public int genomeIndex = -1;
     public string parentGenus;
     public float storedEnergy;
+    public float carbon;                // Schema 15+
     public float germinationEnergy;
     public byte germinationStage;
     public byte sproutStage;

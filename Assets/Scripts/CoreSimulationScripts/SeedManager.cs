@@ -79,6 +79,7 @@ public class SeedManager : MonoBehaviour
                     if (seed.storedEnergy <= 0f)
                     {
                         seedsToRemove.Add(i);
+                        ReturnSeedCarbon(tilePos, seed);
                         ResearchCounters.Today.seedsExhausted++;
                         continue;
                     }
@@ -106,9 +107,11 @@ public class SeedManager : MonoBehaviour
                         if (Random.value > seed.germinationEnergy * (float)seed.sproutStage * 0.05f)
                         {
                             ResearchCounters.Today.seedsFailedToSprout++;
+                            ReturnSeedCarbon(tilePos, seed);
                             continue;
                         }
                         grassManager.SpawnNewGrass(data, tilePos, seed.carriedGenome, seed.storedEnergy, seed.parentGenus, BirthCause.Seedling);
+                        data.grass.ReceiveCarbon(seed.carbon);
                         ResearchCounters.Today.seedsSprouted++;
                         // Later seeds on this tile now see the seedling and wait, instead of overwriting it
                         grass = data.grass;
@@ -151,6 +154,7 @@ public class SeedManager : MonoBehaviour
                     if (seed.storedEnergy <= 0f)
                     {
                         seedsToRemove.Add(i);
+                        ReturnSeedCarbon(tilePos, seed);
                         ResearchCounters.Today.seedsDecayed++;
                         continue;
                     }
@@ -195,6 +199,7 @@ public class SeedManager : MonoBehaviour
                     float requiredEnergy = seed.germinationEnergy * remainingStages;
                     if (requiredEnergy > seed.storedEnergy)
                     {
+                        ReturnSeedCarbon(tilePos, seed);
                         seeds.RemoveAt(i);
                         DecrementSeedCount();
                         ResearchCounters.Today.seedsPruned++;
@@ -240,6 +245,17 @@ public class SeedManager : MonoBehaviour
             indexListPool = new ListPool<int>(LIST_POOL_SIZE, LIST_POOL_SIZE);
         }
         return indexListPool.Get();
+    }
+
+    /// <summary>
+    /// A dead seed's carbon goes into its tile's decay pool, as a dead plant's does.
+    /// </summary>
+    private void ReturnSeedCarbon(Vector3Int tilePos, Seed seed)
+    {
+        if (mapManager.environmentManager != null)
+        {
+            mapManager.environmentManager.AddLitter(mapManager.GetTileEnvironmentData(tilePos), seed.carbon);
+        }
     }
 
     private void DecrementSeedCount()
@@ -295,6 +311,7 @@ public class SeedManager : MonoBehaviour
 
                 while (seeds.Count > maxSeedsPerTile)
                 {
+                    ReturnSeedCarbon(tilePos, seeds[seeds.Count - 1]);
                     seeds.RemoveAt(seeds.Count - 1);
                     DecrementSeedCount();
                 }

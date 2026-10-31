@@ -567,6 +567,7 @@ public static class SimulationLoadSystem
             carriedGenome = genome,
             parentGenus = source.parentGenus,
             storedEnergy = source.storedEnergy,
+            carbon = Mathf.Max(0f, source.carbon), // 0 for pre-schema-15 saves
             germinationEnergy = source.germinationEnergy,
             germinationStage = source.germinationStage,
             sproutStage = source.sproutStage,

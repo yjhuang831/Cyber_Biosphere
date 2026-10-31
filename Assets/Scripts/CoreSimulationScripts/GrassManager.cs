@@ -199,6 +199,7 @@ public class GrassManager : MonoBehaviour
 
             targetData.grass = new GrassInstance(gridposition, grass, spreadCost); // Start with energy equal to spread cost for new spreads
             originData.grass.energyStored -= spreadCost; // Deduct energy cost from parent if spreading
+            targetData.grass.ReceiveCarbon(originData.grass.TakeCarbon(spreadCost * carbonPerEnergy));
 
             // Register the grass instance for updates
             activeGrassInstances[gridposition] = targetData.grass;
@@ -246,6 +247,10 @@ public class GrassManager : MonoBehaviour
         {
             targetData.grass.energyStored = iniEnergy;
         }
+        if (cause == BirthCause.Player)
+        {
+            GiveStartingCarbon(targetData.grass);
+        }
         // Register the grass instance for updates
         activeGrassInstances[gridposition] = targetData.grass;
         if (!hadGrass)
@@ -253,6 +258,17 @@ public class GrassManager : MonoBehaviour
             plantCount = IncrementWithWrap(plantCount);
         }
         mapManager.UpdateGrassTile(targetData, gridposition);
+    }
+
+    /// <summary>
+    /// A hand-planted plant has no parent or seed to carry carbon, so its starting carbon comes from the air.
+    /// </summary>
+    private void GiveStartingCarbon(GrassInstance grass)
+    {
+        if (environmentManager != null)
+        {
+            grass.ReceiveCarbon((float)environmentManager.TakeAtmosphericCarbon(grass.energyStored * carbonPerEnergy));
+        }
     }
 
     /// <summary>
@@ -388,6 +404,7 @@ public class GrassManager : MonoBehaviour
         EnsureGenusAssigned(genome);
         targetData.grass = new GrassInstance(tilePosition, genome);
         targetData.grass.energyStored = initialEnergy;
+        GiveStartingCarbon(targetData.grass);
         activeGrassInstances[tilePosition] = targetData.grass;
         plantCount = IncrementWithWrap(plantCount);
         ResearchCounters.RecordBirth(BirthCause.Player);
@@ -720,7 +737,7 @@ public class GrassManager : MonoBehaviour
     /// <summary>
     /// Disperse seeds from a seeding grass. Releases SeedCount seeds that split the stored seeding energy evenly;
     /// each lands on a random tile within the Manhattan dispersal range (several may share a tile).
-    /// Seeds landing off-map or on a full tile are lost along with their energy.
+    /// Seeds landing off-map or on a full tile are lost along with their energy; their carbon drops as litter under the parent.
     /// </summary>
     private void DisperseSeed(GrassInstance parent, Vector3Int parentPos)
     {
@@ -731,6 +748,8 @@ public class GrassManager : MonoBehaviour
         int range = Mathf.Max(1, (int)parent.genome.GetTraitValue(TraitId.SeedDispersalRange)); // reuse trait 21 for seed dispersal radius
         int seedCount = Mathf.Max(1, Mathf.RoundToInt(parent.genome.GetTraitValue(TraitId.SeedCount)));
         float energyPerSeed = parent.seedingEnergy / seedCount;
+        float carbonPerSeed = parent.TakeSeedCarbon(parent.seedingEnergy * carbonPerEnergy) / seedCount;
+        EnvironmentData parentTile = mapManager.GetTileEnvironmentData(parentPos);
         // Seed provisioning traits come from the mother, like germination energy and sprout stage
         float germinationEnergy = parent.genome.GetTraitValue(TraitId.GerminationEnergy);
         byte sproutStage = (byte)parent.genome.GetTraitValue(TraitId.SproutStage);
@@ -745,6 +764,7 @@ public class GrassManager : MonoBehaviour
             if (!mapManager.IsValidTilePosition(tile))
             {
                 ResearchCounters.Today.seedsLost++;
+                environmentManager.AddLitter(parentTile, carbonPerSeed);
                 continue;
             }
 
@@ -753,6 +773,7 @@ public class GrassManager : MonoBehaviour
                 carriedGenome = parent.seedGenome,
                 parentGenus = parent.genome.genus,
                 storedEnergy = energyPerSeed,
+                carbon = carbonPerSeed,
                 germinationEnergy = germinationEnergy,
                 germinationStage = 0,
                 sproutStage = sproutStage,
@@ -762,6 +783,7 @@ public class GrassManager : MonoBehaviour
             if (!added)
             {
                 ResearchCounters.Today.seedsLost++; // Tile already at the seed cap
+                environmentManager.AddLitter(parentTile, carbonPerSeed);
             }
         }
         parent.seedingEnergy = 0f;
