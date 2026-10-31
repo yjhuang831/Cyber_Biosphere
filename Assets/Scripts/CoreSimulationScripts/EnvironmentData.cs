@@ -1,6 +1,8 @@
 using UnityEngine;
 using System.Collections.Generic;
 
+public enum Nutrient { Nitrogen, Phosphorus, Potassium }
+
 [System.Serializable]
 public class EnvironmentData
 {

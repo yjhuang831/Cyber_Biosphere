@@ -3,7 +3,7 @@ using System.Collections.Generic;
 
 internal static class SimulationSnapshotConstants
 {
-    public const int SchemaVersion = 15;
+    public const int SchemaVersion = 17;
     public const int MinimumSupportedSchemaVersion = 6;
     public const string AutosaveFolder = "Autosaves";
     public const string ManualSaveFolder = "ManualSaves";
@@ -63,6 +63,7 @@ internal class EnvironmentSettingsState
     public float waterMaxLightLevel;
     public float landMaxLightLevel;
     public double atmosphericCarbon;
+    public double mapCarbonTarget;      // Schema 17+
 }
 
 [Serializable]
@@ -114,6 +115,9 @@ internal class TileState
     public double availableNitrogen;
     public double availablePhosphorus;
     public double availablePotassium;
+    public double initialNitrogen;      // Schema 16+: what the tile refills towards
+    public double initialPhosphorus;
+    public double initialPotassium;
 }
 
 [Serializable]
@@ -138,8 +142,8 @@ internal class GrassState
     public float maturityThreshold;
     public float seedingEnergy;
     public float nightEffect = 1f;
-    public float structuralCarbon;      // Schema 13+
-    public float availableCarbon;       // Budget within structuralCarbon, not additional carbon
+    public double structuralCarbon;     // Schema 13+
+    public double availableCarbon;      // Budget within structuralCarbon, not additional carbon
     public float starchCapacity;        // Schema 12+
     public float starchStored;
     public long lastCloneDay = -1;
@@ -160,7 +164,7 @@ internal class SeedState
     public int genomeIndex = -1;
     public string parentGenus;
     public float storedEnergy;
-    public float carbon;                // Schema 15+
+    public double carbon;               // Schema 15+
     public float germinationEnergy;
     public byte germinationStage;
     public byte sproutStage;

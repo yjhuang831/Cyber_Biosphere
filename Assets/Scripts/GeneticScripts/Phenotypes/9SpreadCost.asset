@@ -16,6 +16,6 @@ MonoBehaviour:
   traitName: SpreadCost
   minValue: 5
   maxValue: 25
-  baseValue: 15
+  baseValue: 25
   minLoci: 0
   maxLoci: 1

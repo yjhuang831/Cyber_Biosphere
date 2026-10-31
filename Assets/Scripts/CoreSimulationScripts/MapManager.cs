@@ -31,6 +31,12 @@ public class MapManager : MonoBehaviour
     public int width = 30;
     public int height = 30;
 
+    [Header("Random Terrain")]
+    [Tooltip("Share of map tiles GenerateRandomTerrain makes land.")]
+    [Range(0f, 1f)] public float randomTerrainLandShare = 0.4f;
+    [Tooltip("Rough size in tiles of the landmasses GenerateRandomTerrain makes.")]
+    [Min(1f)] public float randomTerrainFeatureSize = 14f;
+
     [Header("Environment Reference")]
     public EnvironmentManager environmentManager;
     public EnvironmentVisualizer environmentVisualizer;
@@ -185,6 +191,7 @@ public class MapManager : MonoBehaviour
         offsetY = height / 2;
 
         tileEnvironmentData = new EnvironmentData[width, height];
+        environmentManager.CreateInitialNutrientMap();
 
         allTilePositions.Clear();
 
@@ -216,7 +223,7 @@ public class MapManager : MonoBehaviour
                     // Cache neighbor position
                     immediateNeighbors = new List<Vector3Int>()
                 };
-                environmentManager.InitializeNutrientPools(environmentData, true);
+                environmentManager.InitializeNutrientPools(environmentData, tilePos);
                 tileEnvironmentData[x, y] = environmentData;
 
                 for (int i = -1; i <= 1; i++)
@@ -267,8 +274,9 @@ public class MapManager : MonoBehaviour
         int y = tilePos.y + offsetY;
 
         EnvironmentData data = tileEnvironmentData[x, y];
+        environmentManager.ChangeInitialNutrientTerrain(tilePos, data.isWater, isWater);
         data.isWater = isWater;
-        environmentManager.InitializeNutrientPools(data, isWater);
+        environmentManager.InitializeNutrientPools(data, tilePos);
         terrainTilemap.SetTile(tilePos, isWater ? waterTile : GetRandomLandTile());
 
         if (isWater)
@@ -290,11 +298,68 @@ public class MapManager : MonoBehaviour
 
     void UpdateTileEnvironmentData(Vector3Int tilePos, bool isWater)
     {
+        ApplyTerrainChange(tilePos, isWater);
+        environmentManager.UpdateTileEnvironment(tilePos); // Trigger environment update for this specific tile
+    }
+
+    /// <summary>
+    /// Random landmasses across the whole map, covering randomTerrainLandShare of it (the map's current terrain is
+    /// replaced). Plants on tiles that change die, as they do when painted over. Public for wiring to a UI button.
+    /// </summary>
+    public void GenerateRandomTerrain()
+    {
+        const float SECOND_LAYER_DETAIL = 2.5f; // Second noise layer: smaller features, for less blobby coasts
+        const float SECOND_LAYER_WEIGHT = 0.4f;
+        const float NOISE_OFFSET_RANGE = 1000f;
+
+        float noiseX = Random.Range(0f, NOISE_OFFSET_RANGE);
+        float noiseY = Random.Range(0f, NOISE_OFFSET_RANGE);
+        float[] noise = new float[allTilePositions.Count];
+        for (int i = 0; i < noise.Length; i++)
+        {
+            float x = allTilePositions[i].x / randomTerrainFeatureSize;
+            float y = allTilePositions[i].y / randomTerrainFeatureSize;
+            noise[i] = Mathf.PerlinNoise(noiseX + x, noiseY + y)
+                + SECOND_LAYER_WEIGHT * Mathf.PerlinNoise(noiseY + x * SECOND_LAYER_DETAIL, noiseX + y * SECOND_LAYER_DETAIL);
+        }
+
+        // Ranking the noise gives the requested land share exactly, whatever this map's noise looks like
+        float[] sorted = (float[])noise.Clone();
+        System.Array.Sort(sorted);
+        int waterTiles = Mathf.RoundToInt((1f - randomTerrainLandShare) * noise.Length);
+        float landAbove = waterTiles >= noise.Length ? float.PositiveInfinity : sorted[waterTiles];
+
+        for (int i = 0; i < noise.Length; i++)
+        {
+            Vector3Int tilePos = allTilePositions[i];
+            EnvironmentData data = GetTileEnvironmentData(tilePos);
+            bool isWater = noise[i] < landAbove;
+            if (data.isWater == isWater)
+                continue;
+
+            terrainTilemap.SetTile(tilePos, isWater ? waterTile : GetRandomLandTile());
+            ApplyTerrainChange(tilePos, isWater);
+            if (data.grass != null)
+            {
+                grassManager.RemoveGrassInstance(tilePos, data, DeathCause.TerrainChange);
+            }
+        }
+
+        environmentManager.UpdateTileEnvironment(null, true);
+    }
+
+    /// <summary>
+    /// Changes one tile's terrain data. The caller updates the environment afterwards, which reaches the tile's neighbours.
+    /// </summary>
+    private void ApplyTerrainChange(Vector3Int tilePos, bool isWater)
+    {
         int x = tilePos.x + offsetX;
         int y = tilePos.y + offsetY;
 
+        environmentManager.ChangeInitialNutrientTerrain(tilePos, tileEnvironmentData[x, y].isWater, isWater);
+        environmentManager.ReleaseLitterToAtmosphere(tileEnvironmentData[x, y]);
         tileEnvironmentData[x, y].isWater = isWater;
-        environmentManager.InitializeNutrientPools(tileEnvironmentData[x, y], isWater);
+        environmentManager.InitializeNutrientPools(tileEnvironmentData[x, y], tilePos);
 
         // Update the tile's environmental data
         if (isWater)
@@ -310,8 +375,6 @@ public class MapManager : MonoBehaviour
 
         // Invalidate cached color so it will be recalculated when tile type changes
         tileEnvironmentData[x, y].cachedTileColor = new Color(-1, -1, -1, -1); // Invalid color marker
-
-        environmentManager.UpdateTileEnvironment(tilePos); // Trigger environment update for this specific tile
     }
 
     public EnvironmentData GetTileEnvironmentData(Vector3Int pos)

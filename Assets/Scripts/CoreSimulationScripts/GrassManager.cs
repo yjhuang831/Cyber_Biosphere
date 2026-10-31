@@ -34,6 +34,18 @@ public class GrassManager : MonoBehaviour
     [Min(0f)] public float carbonPerEnergy = 0.01f;
     [Tooltip("Carbon released per unit of starch respired. Higher than carbonPerEnergy, so respiration returns carbon faster than photosynthesis takes it in.")]
     [Min(0f)] public float respirationCarbonPerEnergy = 0.02f;
+    [Tooltip("Carbon released per unit of starch capacity per sim second, full or empty, paid from available carbon. A plant that can't pay loses capacity.")]
+    [Min(0f)] public float storageCarbonUpkeep = 0.00001f;
+
+    [Header("Height")]
+    [Tooltip("Carbon cost of growth at height 0.1, relative to default height 0.5 (energy cost is unchanged).")]
+    [Min(0f)] public float shortestGrowthCarbon = 0.7f;
+    [Tooltip("Carbon cost of growth at height 1, relative to default height 0.5 (energy cost is unchanged).")]
+    [Min(0f)] public float tallestGrowthCarbon = 2f;
+    [Tooltip("Share of light lost when all 8 neighbours' canopies stand one height unit above the plant. Each taller neighbour adds its share by how far it stands above.")]
+    [Range(0f, 1f)] public float heightShadeStrength = 0.8f;
+    [Tooltip("How many times per sim day plants re-check their neighbours for shade.")]
+    [Min(1)] public int shadeUpdatesPerDay = 6;
 
     // Collection of active grass instances for individual updates
     internal Dictionary<Vector3Int, GrassInstance> activeGrassInstances = new Dictionary<Vector3Int, GrassInstance>();
@@ -47,6 +59,8 @@ public class GrassManager : MonoBehaviour
     internal readonly GenusTracker genusTracker = new GenusTracker();
     private readonly List<PlantGenome> plantGenomesScratch = new List<PlantGenome>();
     private readonly List<PlantGenome> seedGenomesScratch = new List<PlantGenome>();
+    private const int NEIGHBORS_PER_TILE = 8;
+    private float shadeTimer = 0f;
 
     void Start()
     {
@@ -62,8 +76,18 @@ public class GrassManager : MonoBehaviour
             environment = environmentManager,
             co2Factor = environmentManager != null ? environmentManager.GetCO2PhotosynthesisFactor() : 1f,
             carbonPerEnergy = carbonPerEnergy,
-            respirationCarbonPerEnergy = respirationCarbonPerEnergy
+            respirationCarbonPerEnergy = respirationCarbonPerEnergy,
+            storageCarbonUpkeep = storageCarbonUpkeep,
+            shortestGrowthCarbon = shortestGrowthCarbon,
+            tallestGrowthCarbon = tallestGrowthCarbon
         };
+
+        shadeTimer += simTime;
+        if (shadeTimer >= TimeController.fullDayLength / Mathf.Max(1, shadeUpdatesPerDay))
+        {
+            shadeTimer = 0f;
+            UpdateShade();
+        }
 
         using (var pooled = GetPooledPositions())
         {
@@ -199,7 +223,7 @@ public class GrassManager : MonoBehaviour
 
             targetData.grass = new GrassInstance(gridposition, grass, spreadCost); // Start with energy equal to spread cost for new spreads
             originData.grass.energyStored -= spreadCost; // Deduct energy cost from parent if spreading
-            targetData.grass.ReceiveCarbon(originData.grass.TakeCarbon(spreadCost * carbonPerEnergy));
+            targetData.grass.ReceiveCarbon(originData.grass.TakeCarbon((double)spreadCost * carbonPerEnergy));
 
             // Register the grass instance for updates
             activeGrassInstances[gridposition] = targetData.grass;
@@ -218,8 +242,8 @@ public class GrassManager : MonoBehaviour
         if (grass == null || environmentManager == null)
             return;
         environmentManager.AddLitter(tile, grass.structuralCarbon);
-        grass.structuralCarbon = 0f;
-        grass.availableCarbon = 0f;
+        grass.structuralCarbon = 0.0;
+        grass.availableCarbon = 0.0;
     }
 
     internal void SpawnNewGrass(EnvironmentData targetData, Vector3Int gridposition, PlantGenome genome = null, float iniEnergy = 0f, string parentGenus = null, BirthCause cause = BirthCause.Player)
@@ -267,7 +291,7 @@ public class GrassManager : MonoBehaviour
     {
         if (environmentManager != null)
         {
-            grass.ReceiveCarbon((float)environmentManager.TakeAtmosphericCarbon(grass.energyStored * carbonPerEnergy));
+            grass.ReceiveCarbon(environmentManager.TakeAtmosphericCarbon((double)grass.energyStored * carbonPerEnergy));
         }
     }
 
@@ -319,6 +343,29 @@ public class GrassManager : MonoBehaviour
         }
 
         genusTracker.UpdateDaily(plantGenomesScratch, seedGenomesScratch, maxBreedingDistance, TimeController.simDaysSinceStart);
+    }
+
+    /// <summary>
+    /// Shade update: each plant is dimmed by every neighbouring canopy that stands above its own height, in proportion to
+    /// how far it stands above. A plant's own height is genetic, so newborns aren't shaded by adults of the same height,
+    /// and canopy grows with size, so newborns don't shade anyone.
+    /// </summary>
+    internal void UpdateShade()
+    {
+        foreach (KeyValuePair<Vector3Int, GrassInstance> entry in activeGrassInstances)
+        {
+            float ownHeight = entry.Value.Height;
+            float canopyAbove = 0f;
+            foreach (Vector3Int neighborPos in mapManager.GetTileEnvironmentData(entry.Key).immediateNeighbors)
+            {
+                GrassInstance neighbor = mapManager.GetTileEnvironmentData(neighborPos).grass;
+                if (neighbor != null)
+                {
+                    canopyAbove += Mathf.Max(0f, neighbor.CanopyHeight - ownHeight);
+                }
+            }
+            entry.Value.shadeMultiplier = 1f - heightShadeStrength * canopyAbove / NEIGHBORS_PER_TILE;
+        }
     }
 
     /// <summary>
@@ -748,7 +795,7 @@ public class GrassManager : MonoBehaviour
         int range = Mathf.Max(1, (int)parent.genome.GetTraitValue(TraitId.SeedDispersalRange)); // reuse trait 21 for seed dispersal radius
         int seedCount = Mathf.Max(1, Mathf.RoundToInt(parent.genome.GetTraitValue(TraitId.SeedCount)));
         float energyPerSeed = parent.seedingEnergy / seedCount;
-        float carbonPerSeed = parent.TakeSeedCarbon(parent.seedingEnergy * carbonPerEnergy) / seedCount;
+        double carbonPerSeed = parent.TakeSeedCarbon((double)parent.seedingEnergy * carbonPerEnergy) / seedCount;
         EnvironmentData parentTile = mapManager.GetTileEnvironmentData(parentPos);
         // Seed provisioning traits come from the mother, like germination energy and sprout stage
         float germinationEnergy = parent.genome.GetTraitValue(TraitId.GerminationEnergy);

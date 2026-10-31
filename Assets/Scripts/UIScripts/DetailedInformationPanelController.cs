@@ -250,7 +250,19 @@ public class DetailedInformationPanelController : MonoBehaviour
             "\nLitter (decaying): " + currentData.litterCarbon.ToString("F2") +
             (mapManager != null && mapManager.environmentManager != null
                 ? "\nAtmospheric carbon (map): " + mapManager.environmentManager.atmosphericCarbon.ToString("F2")
+                    + FormatNutrient("Nitrogen", currentData.availableNitrogen, Nutrient.Nitrogen)
+                    + FormatNutrient("Phosphorus", currentData.availablePhosphorus, Nutrient.Phosphorus)
+                    + FormatNutrient("Potassium", currentData.availablePotassium, Nutrient.Potassium)
                 : "");
+    }
+
+    private string FormatNutrient(string label, double level, Nutrient nutrient)
+    {
+        // The selected tile can be off the map after loading a smaller one
+        if (!mapManager.IsValidTilePosition(currentPos))
+            return "";
+
+        return "\n" + label + ": " + level.ToString("F1") + " / " + mapManager.environmentManager.GetInitialNutrient(currentPos, nutrient).ToString("F1");
     }
 
     private void UpdateSeedInfo()
@@ -635,10 +647,12 @@ public class DetailedInformationPanelController : MonoBehaviour
             .Append(Colored(MUTED_COLOR, " (storage can grow to " + starchMax.ToString("F0") + ")")).Append('\n');
         if (grassManager != null)
         {
+            text.Append("  Height: ").Append(grass.Height.ToString("F2"))
+                .Append(Colored(MUTED_COLOR, " (growth uses x" + grass.HeightCarbonMultiplier(grassManager.shortestGrowthCarbon, grassManager.tallestGrowthCarbon).ToString("F2") + " carbon)")).Append('\n');
             text.Append("  Structural carbon: ").Append(grass.structuralCarbon.ToString("F2"))
-                .Append(Colored(MUTED_COLOR, " (all carbon in the plant; respiration releases it)")).Append('\n');
+                .Append(Colored(MUTED_COLOR, " (all carbon in the plant; respiration and storage upkeep release it)")).Append('\n');
             text.Append("  Available carbon: ").Append(grass.availableCarbon.ToString("F2"))
-                .Append(Colored(MUTED_COLOR, " (budget for growth, storage and seeds)")).Append('\n');
+                .Append(Colored(MUTED_COLOR, " (budget for growth, storage, seeds and storage upkeep)")).Append('\n');
         }
 
         List<string> warnings = CollectWarnings(grass, envData, budget, factors);
@@ -712,7 +726,7 @@ public class DetailedInformationPanelController : MonoBehaviour
         }
         if (isDay && factors.lightEfficiency < POOR_FIT)
         {
-            warnings.Add(envData.light < genome.GetTraitValue(TraitId.LightRequirement) ? "Too dark for this plant" : "Too bright for this plant");
+            warnings.Add(envData.light * grass.shadeMultiplier < genome.GetTraitValue(TraitId.LightRequirement) ? "Too dark for this plant" : "Too bright for this plant");
         }
 
         // Dormancy is decided at dawn from the day's daylight average (GrassInstance.DailyDormancyDecision)
@@ -741,9 +755,11 @@ public class DetailedInformationPanelController : MonoBehaviour
 
         if (isDay)
         {
-            string lightNote = factors.lightEfficiency >= 0.99f ? "" : envData.light < lightNeed ? " too dark" : " too bright";
-            text.Append("  Light: ").Append(FormatPercent(envData.light * 100f)).Append(" of full sun, needs ").Append(FormatPercent(lightNeed * 100f))
-                .Append(" -> ").Append(FormatScore(factors.lightEfficiency)).Append(lightNote).Append('\n');
+            float reachingLight = envData.light * grass.shadeMultiplier;
+            string lightNote = factors.lightEfficiency >= 0.99f ? "" : reachingLight < lightNeed ? " too dark" : " too bright";
+            string shadeNote = grass.shadeMultiplier < 1f ? Colored(MUTED_COLOR, " (shaded by taller neighbours)") : "";
+            text.Append("  Light: ").Append(FormatPercent(reachingLight * 100f)).Append(" of full sun, needs ").Append(FormatPercent(lightNeed * 100f))
+                .Append(" -> ").Append(FormatScore(factors.lightEfficiency)).Append(lightNote).Append(shadeNote).Append('\n');
         }
         else
         {

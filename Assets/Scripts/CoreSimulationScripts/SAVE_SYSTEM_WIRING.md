@@ -4,6 +4,9 @@ This document explains how to wire the current save system in Unity after the re
 
 ## 1. Current Save Behavior
 
+- Snapshot files are gzip-compressed JSON but keep the `.json` extension, so names, listing, and load identifiers are unchanged.
+  Older uncompressed saves still load; the loader tells them apart by the file's first two bytes. To read one by hand, decompress it first.
+
 - Autosave:
   - Writes to: `Application.persistentDataPath/Autosaves`
   - File name format: `sim_autosave_yyyyMMdd_HHmmss.json`
@@ -96,7 +99,11 @@ Behavior:
   - Phase 2: rebuild map size/topology, restore environment settings (tile-level values are recalculated from them),
     plants, seeds, counters, time state, and the selected season.
 
-- Schema `15` (current): seeds save `carbon`, moved from the parent and passed to the seedling; older saves load with seeds holding none.
+- Schema `17` (current): plant and seed carbon are saved in double precision, and the environment saves `mapCarbonTarget`, the total the monthly leak check restores; older saves use the total they hold.
+
+- Schema `16`: tiles save their initial N/P/K levels, which nutrients refill towards; older saves keep their current levels and get a new random initial map.
+
+- Schema `15`: seeds save `carbon`, moved from the parent and passed to the seedling; older saves load with seeds holding none.
 
 - Schema `14`: soil organic carbon removed; older saves load without it, and any carbon they held there is dropped.
 
@@ -141,4 +148,4 @@ Behavior:
   - Keeps per-tile `oxygen` so local oxygen state from grass/environment history is preserved.
   - No longer stores genome `phenotypes`; phenotypes are rebuilt from DNA on load.
   - Adds map-level available N/P/K pools plus the atmospheric carbon reservoir.
-  - Loader supports schemas `6` to `15`; older schemas are rejected.
+  - Loader supports schemas `6` to `17`; older schemas are rejected.

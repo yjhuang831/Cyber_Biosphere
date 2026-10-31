@@ -621,6 +621,10 @@ public class TimeController : MonoBehaviour
                 FinishGerminationDay();
                 seedManager.SeedDecay();
                 grassManager.UpdateGenera();
+                if (simDaysSinceStart % (SeasonManager.daysPerYear / 12) == 0)
+                {
+                    environmentManager.RefillLeakedCarbon();
+                }
                 long completedDay = simDaysSinceStart > 0 ? simDaysSinceStart - 1 : MAX_DAY_COUNTER - 1;
                 if (researchLogger != null)
                 {
@@ -763,7 +767,7 @@ public class TimeController : MonoBehaviour
         long day = dayOfYear % daysPerMonth;
 
         // Convert to 1-based indexing for display
-        return $"{year:D4}/{month + 1:D2}/{day + 1:D2}";
+        return $"{year + 1:D4}/{month + 1:D2}/{day + 1:D2}";
     }
 
     public void SetMaxAutosaveFiles(int newLimit)

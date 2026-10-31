@@ -153,7 +153,10 @@ public static class SimulationSaveSystem
                 litterCarbon = env.litterCarbon,
                 availableNitrogen = env.availableNitrogen,
                 availablePhosphorus = env.availablePhosphorus,
-                availablePotassium = env.availablePotassium
+                availablePotassium = env.availablePotassium,
+                initialNitrogen = mapManager.environmentManager.GetInitialNutrient(tilePos, Nutrient.Nitrogen),
+                initialPhosphorus = mapManager.environmentManager.GetInitialNutrient(tilePos, Nutrient.Phosphorus),
+                initialPotassium = mapManager.environmentManager.GetInitialNutrient(tilePos, Nutrient.Potassium)
             });
 
             if (grassManager.activeGrassInstances != null
@@ -246,7 +249,8 @@ public static class SimulationSaveSystem
             baseLightLevel = environmentManager.baseLightLevel,
             waterMaxLightLevel = environmentManager.waterMaxLightLevel,
             landMaxLightLevel = environmentManager.landMaxLightLevel,
-            atmosphericCarbon = environmentManager.atmosphericCarbon
+            atmosphericCarbon = environmentManager.atmosphericCarbon,
+            mapCarbonTarget = environmentManager.mapCarbonTarget
         };
     }
 
@@ -455,7 +459,7 @@ public static class SimulationSaveSystem
     private static void WriteSnapshotFile(string path, SimulationSnapshot snapshot)
     {
         string json = JsonUtility.ToJson(snapshot, false);
-        SaveFileUtility.WriteAllTextAtomic(path, json);
+        SaveFileUtility.WriteCompressedTextAtomic(path, json);
     }
 
     private static void PruneAutosavesToLimit(int maxFiles)

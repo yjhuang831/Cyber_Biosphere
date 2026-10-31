@@ -33,7 +33,7 @@ public class SeasonManager : MonoBehaviour
         seasons.Add(new Season("Spring", 0f, 13f));
         seasons.Add(new Season("Summer", 18f, 16f));
         seasons.Add(new Season("Fall", 3f, 12f));
-        seasons.Add(new Season("Winter", -35f, 8f));
+        seasons.Add(new Season("Winter", -15f, 8f));
 
         ApplySeasonImmediate(0);
         daysPerYear = 12 * DAYS_PER_MONTH;

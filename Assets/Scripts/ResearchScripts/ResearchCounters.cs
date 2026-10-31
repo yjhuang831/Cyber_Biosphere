@@ -96,4 +96,6 @@ internal class DailyEventCounts
     public int generaFounded;      // New genera, from new wild plants or from groups that stopped being able to breed
     public int generaExtinct;
     public int crossesBlockedByGenus; // Pollen reached a flowering plant of another genus
+
+    public double carbonRefilled;  // Added to the air by the monthly leak check; anything sizeable means a carbon bug
 }

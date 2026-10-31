@@ -31,7 +31,8 @@ public static class TraitId
     public const int SeedColdPreservation = 24;  // Share of daily seed decay avoided in the cold; 0 = none
 
     public const int StarchStorage = 25;         // Maximum starch the plant can develop storage for
+    public const int Height = 26;                // 0.5 without the gene: growth uses more carbon with height, and taller neighbours shade shorter plants
 
     // Number of trait ids; used for fallback phenotype arrays when no TraitDatabase is available
-    public const int Count = 26;
+    public const int Count = 27;
 }

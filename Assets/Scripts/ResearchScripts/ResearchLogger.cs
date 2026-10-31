@@ -170,7 +170,7 @@ internal class ResearchLogger
         DailySummary summary = new DailySummary
         {
             day = day,
-            year = (int)(day / daysPerYear),
+            year = (int)(day / daysPerYear) + 1,
             month = (int)(day % daysPerYear / daysPerMonth) + 1,
             dayOfMonth = (int)(day % daysPerMonth) + 1,
             season = seasonManager != null ? seasonManager.CurrentSeason : -1,
@@ -191,7 +191,7 @@ internal class ResearchLogger
 
     private void AddPlantStats(DailySummary summary)
     {
-        double energy = 0, density = 0, age = 0, generation = 0, loci = 0, capacity = 0, starchCapacity = 0, starchStored = 0;
+        double energy = 0, density = 0, age = 0, generation = 0, loci = 0, capacity = 0, starchCapacity = 0, starchStored = 0, shadeLight = 0;
         Dictionary<string, LineageCount> lineages = new Dictionary<string, LineageCount>();
 
         foreach (GrassInstance grass in grassManager.activeGrassInstances.Values)
@@ -208,6 +208,11 @@ internal class ResearchLogger
             energy += grass.energyStored;
             capacity += grass.EnergyCapacity;
             starchCapacity += grass.starchCapacity;
+            if (grass.shadeMultiplier < 1f)
+            {
+                summary.plantsShaded++;
+                shadeLight += grass.shadeMultiplier;
+            }
             starchStored += grass.starchStored;
             summary.structuralCarbon += grass.structuralCarbon;
             summary.availableCarbon += grass.availableCarbon;
@@ -238,6 +243,7 @@ internal class ResearchLogger
             summary.meanEnergy = (float)(energy / summary.plants);
             summary.meanEnergyCapacity = (float)(capacity / summary.plants);
             summary.meanStarchCapacity = (float)(starchCapacity / summary.plants);
+            summary.meanLightWhenShaded = summary.plantsShaded > 0 ? (float)(shadeLight / summary.plantsShaded) : 1f;
             summary.meanStarchStored = (float)(starchStored / summary.plants);
             summary.meanDensity = (float)(density / summary.plants);
             summary.meanAgeDays = (float)(age / summary.plants);
@@ -544,6 +550,8 @@ internal class DailySummary
     public float meanEnergyCapacity;
     public float meanStarchCapacity;
     public float meanStarchStored;
+    public int plantsShaded;
+    public float meanLightWhenShaded;   // Share of light reaching the plants that are shaded
 
     public DailyEventCounts events;
 }

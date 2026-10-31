@@ -130,7 +130,7 @@ public static class SimulationLoadSystem
         PlantGenome[] genomes;
         try
         {
-            string json = File.ReadAllText(snapshotPath);
+            string json = SaveFileUtility.ReadAllTextOrGzip(snapshotPath);
             snapshot = JsonUtility.FromJson<SimulationSnapshot>(json);
             if (snapshot == null)
             {
@@ -357,6 +357,13 @@ public static class SimulationLoadSystem
                 {
                     env.litterCarbon = Math.Max(0.0, tileState.litterCarbon);
                 }
+                // Older saves keep the fresh random map ReinitializeForLoad made
+                if (snapshot.schemaVersion >= 16)
+                {
+                    environmentManager.SetInitialNutrient(tilePos, Nutrient.Nitrogen, tileState.initialNitrogen);
+                    environmentManager.SetInitialNutrient(tilePos, Nutrient.Phosphorus, tileState.initialPhosphorus);
+                    environmentManager.SetInitialNutrient(tilePos, Nutrient.Potassium, tileState.initialPotassium);
+                }
             }
             env.grass = null;
         }
@@ -426,6 +433,12 @@ public static class SimulationLoadSystem
             }
         }
 
+        grassManager.UpdateShade();
+        // Older saves have no target; take what they hold, so a past leak isn't refilled all at once
+        if (snapshot.schemaVersion < 17)
+        {
+            environmentManager.mapCarbonTarget = environmentManager.MapCarbonTotal();
+        }
         grassManager.plantCount = loadedPlantCount;
         seedManager.seedCount = loadedSeedCount;
 
@@ -485,6 +498,7 @@ public static class SimulationLoadSystem
         target.waterMaxLightLevel = source.waterMaxLightLevel;
         target.landMaxLightLevel = source.landMaxLightLevel;
         target.atmosphericCarbon = Math.Max(0.0, source.atmosphericCarbon);
+        target.mapCarbonTarget = source.mapCarbonTarget;
     }
 
     private static void ApplyGrassSettings(GrassSettingsState source, GrassManager target, SeedManager seedTarget)
@@ -540,8 +554,8 @@ public static class SimulationLoadSystem
         grass.maturityThreshold = source.maturityThreshold;
         grass.seedingEnergy = source.seedingEnergy;
         grass.nightEffect = source.nightEffect > 0f ? source.nightEffect : 1f;
-        grass.structuralCarbon = Mathf.Max(0f, source.structuralCarbon);
-        grass.availableCarbon = Mathf.Max(0f, source.availableCarbon);
+        grass.structuralCarbon = Math.Max(0.0, source.structuralCarbon);
+        grass.availableCarbon = Math.Max(0.0, source.availableCarbon);
         grass.starchCapacity = Mathf.Max(0f, source.starchCapacity); // 0 for pre-schema-12 saves; redeveloped after load
         grass.starchStored = Mathf.Clamp(source.starchStored, 0f, grass.starchCapacity);
         grass.lastCloneDay = source.lastCloneDay;
@@ -567,7 +581,7 @@ public static class SimulationLoadSystem
             carriedGenome = genome,
             parentGenus = source.parentGenus,
             storedEnergy = source.storedEnergy,
-            carbon = Mathf.Max(0f, source.carbon), // 0 for pre-schema-15 saves
+            carbon = Math.Max(0.0, source.carbon), // 0 for pre-schema-15 saves
             germinationEnergy = source.germinationEnergy,
             germinationStage = source.germinationStage,
             sproutStage = source.sproutStage,

@@ -17,6 +17,10 @@ public class EnvironmentManager : MonoBehaviour
 
     [Header("Hydration Settings")]
     public float baseLandHydration = 20f;
+    [Tooltip("Extra hydration on land right beside water, on top of baseLandHydration.")]
+    [Min(0f)] public float coastalHydrationBonus = 60f;
+    [Tooltip("Tiles inland over which coastal hydration fades to baseLandHydration.")]
+    [Min(1)] public int coastalHydrationFadeTiles = 5;
 
     [Header("Other Factors")]
     public float waterLightLevel = 0f;
@@ -38,9 +42,14 @@ public class EnvironmentManager : MonoBehaviour
     public float waterPhosphorus = 10f;
     public float landPotassium = 40f;
     public float waterPotassium = 16f;
+    [Tooltip("How far each tile's initial nutrients stray from the land/water levels above: 0.6 = between x0.4 and x1.6.")]
+    [Range(0f, 1f)] public float nutrientVariation = 0.6f;
+    [Tooltip("Rough size in tiles of nutrient-rich and nutrient-poor patches. N, P and K are patterned separately, so their ratios differ across the map.")]
+    [Min(1f)] public float nutrientPatchSize = 12f;
     [Tooltip("Atmospheric carbon (map total, relative map-carbon units). Feeds photosynthesis; does not affect temperature. " +
              "Double precision: the pool takes tiny per-plant exchanges every update.")]
     public double atmosphericCarbon = 0.0;
+    internal double mapCarbonTarget = 0.0; // The map's total carbon: set when a new map starts, restored by RefillLeakedCarbon
 
     [Header("Atmospheric CO2 and Photosynthesis")]
     [Tooltip("Atmospheric carbon per map tile at which photosynthesis runs at its normal rate (x1). New maps start at this level.")]
@@ -52,14 +61,18 @@ public class EnvironmentManager : MonoBehaviour
     [Header("Litter (Decay Pool)")]
     [Tooltip("Share of each tile's litter (carbon from dead plants) that decays into atmospheric CO2 per sim second.")]
     [Min(0f)] public float litterDecayRate = 0.0005f;
-    [Tooltip("Relative nitrogen deposition per simulated second.")]
-    [Min(0f)] public float nitrogenDepositionRate = 0.00001f;
-    [Tooltip("Relative phosphorus weathering per simulated second.")]
-    [Min(0f)] public float phosphorusWeatheringRate = 0.000002f;
-    [Tooltip("Relative potassium weathering per simulated second.")]
-    [Min(0f)] public float potassiumWeatheringRate = 0.000005f;
-    [Tooltip("Fraction of available land nutrients carried to adjacent water per simulated second.")]
-    [Min(0f)] public float nutrientLeachingRate = 0.0001f;
+
+    [Header("Nutrient Refill and Erosion")]
+    [Tooltip("Share of a tile's nitrogen shortfall (below its initial level) refilled per simulated second.")]
+    [Min(0f)] public float nitrogenRefillRate = 0.00003f;
+    [Tooltip("Share of a tile's phosphorus shortfall (below its initial level) refilled per simulated second.")]
+    [Min(0f)] public float phosphorusRefillRate = 0.00001f;
+    [Tooltip("Share of a tile's potassium shortfall (below its initial level) refilled per simulated second.")]
+    [Min(0f)] public float potassiumRefillRate = 0.00002f;
+    [Tooltip("Share of a tile's excess (above its initial level) lost per simulated second, so eroded nutrients don't pile up in coastal water.")]
+    [Min(0f)] public float nutrientSettlingRate = 0.00001f;
+    [Tooltip("Fraction of available land nutrients eroded into adjacent water per simulated second, at full hydration with all neighbours water.")]
+    [Min(0f)] public float nutrientLeachingRate = 0.000005f;
 
     [Header("References")]
     public MapManager mapManager;
@@ -102,8 +115,8 @@ public class EnvironmentManager : MonoBehaviour
             List<Vector3Int> tilesToCheck = pooled.List;
             if (centerPosition.HasValue)
             {
-                // Only check tiles within a certain radius of the center position for efficiency
-                int radius = 6; // Example radius, can be adjusted
+                // A terrain change reaches as far as coastal hydration does
+                int radius = coastalHydrationFadeTiles + 1;
                 for (int x = -radius; x <= radius; x++)
                 {
                     for (int y = -radius; y <= radius; y++)
@@ -166,15 +179,106 @@ public class EnvironmentManager : MonoBehaviour
         }
     }
 
-    internal void InitializeNutrientPools(EnvironmentData data, bool isWater)
+    /// <summary>
+    /// Sets a tile's pools to its initial nutrient levels. Call after the initial nutrient map covers the tile.
+    /// </summary>
+    internal void InitializeNutrientPools(EnvironmentData data, Vector3Int tilePos)
     {
         if (data == null)
             return;
 
         data.litterCarbon = 0.0;
-        data.availableNitrogen = System.Math.Max(0.0, isWater ? waterNitrogen : landNitrogen);
-        data.availablePhosphorus = System.Math.Max(0.0, isWater ? waterPhosphorus : landPhosphorus);
-        data.availablePotassium = System.Math.Max(0.0, isWater ? waterPotassium : landPotassium);
+        data.availableNitrogen = GetInitialNutrient(tilePos, Nutrient.Nitrogen);
+        data.availablePhosphorus = GetInitialNutrient(tilePos, Nutrient.Phosphorus);
+        data.availablePotassium = GetInitialNutrient(tilePos, Nutrient.Potassium);
+    }
+
+    // ---- Initial nutrient map ----
+    // What each tile refills towards. Random patches for a new map; every tile starts as water, as the map does.
+
+    private const int NUTRIENT_COUNT = 3;
+    private const float NUTRIENT_NOISE_OFFSET_RANGE = 1000f;
+    private const float NUTRIENT_NOISE_STRETCH = 2.5f; // Perlin noise rarely reaches its extremes; this spreads it over the full range
+
+    private double[,,] initialNutrients; // [map x, map y, Nutrient]
+
+    internal void CreateInitialNutrientMap()
+    {
+        int width = mapManager.width;
+        int height = mapManager.height;
+        initialNutrients = new double[width, height, NUTRIENT_COUNT];
+
+        for (int nutrient = 0; nutrient < NUTRIENT_COUNT; nutrient++)
+        {
+            float noiseX = Random.Range(0f, NUTRIENT_NOISE_OFFSET_RANGE);
+            float noiseY = Random.Range(0f, NUTRIENT_NOISE_OFFSET_RANGE);
+            double waterLevel = TerrainNutrientLevel((Nutrient)nutrient, true);
+
+            for (int x = 0; x < width; x++)
+            {
+                for (int y = 0; y < height; y++)
+                {
+                    float noise = Mathf.PerlinNoise(noiseX + x / nutrientPatchSize, noiseY + y / nutrientPatchSize);
+                    float deviation = Mathf.Clamp((noise - 0.5f) * NUTRIENT_NOISE_STRETCH, -1f, 1f);
+                    initialNutrients[x, y, nutrient] = waterLevel * (1f + nutrientVariation * deviation);
+                }
+            }
+        }
+    }
+
+    private double TerrainNutrientLevel(Nutrient nutrient, bool isWater)
+    {
+        float level;
+        switch (nutrient)
+        {
+            case Nutrient.Nitrogen:
+                level = isWater ? waterNitrogen : landNitrogen;
+                break;
+            case Nutrient.Phosphorus:
+                level = isWater ? waterPhosphorus : landPhosphorus;
+                break;
+            default:
+                level = isWater ? waterPotassium : landPotassium;
+                break;
+        }
+        return System.Math.Max(0.0, level);
+    }
+
+    internal double GetInitialNutrient(Vector3Int tilePos, Nutrient nutrient)
+    {
+        return initialNutrients[tilePos.x + mapManager.width / 2, tilePos.y + mapManager.height / 2, (int)nutrient];
+    }
+
+    internal void SetInitialNutrient(Vector3Int tilePos, Nutrient nutrient, double value)
+    {
+        initialNutrients[tilePos.x + mapManager.width / 2, tilePos.y + mapManager.height / 2, (int)nutrient] = System.Math.Max(0.0, value);
+    }
+
+    /// <summary>
+    /// Moves a tile's initial nutrients to its new terrain's level, keeping how rich or poor the tile is for that terrain.
+    /// </summary>
+    internal void ChangeInitialNutrientTerrain(Vector3Int tilePos, bool wasWater, bool isWater)
+    {
+        if (wasWater == isWater)
+            return;
+
+        for (int i = 0; i < NUTRIENT_COUNT; i++)
+        {
+            Nutrient nutrient = (Nutrient)i;
+            double oldLevel = TerrainNutrientLevel(nutrient, wasWater);
+            double newLevel = TerrainNutrientLevel(nutrient, isWater);
+            SetInitialNutrient(tilePos, nutrient, oldLevel > 0.0 ? GetInitialNutrient(tilePos, nutrient) * newLevel / oldLevel : newLevel);
+        }
+    }
+
+    /// <summary>
+    /// Refills a tile's nutrient towards its initial level, or lets an excess settle back down.
+    /// </summary>
+    private static double MoveTowardsInitial(double level, double initial, double refillFraction, double settlingFraction)
+    {
+        return level < initial
+            ? level + (initial - level) * refillFraction
+            : level - (level - initial) * settlingFraction;
     }
 
     // ---- Atmospheric CO2 ----
@@ -220,6 +324,45 @@ public class EnvironmentManager : MonoBehaviour
     internal void ResetAtmosphereForNewMap()
     {
         atmosphericCarbon = (double)referenceAtmosphericCarbonPerTile * TileCount;
+        mapCarbonTarget = atmosphericCarbon;
+    }
+
+    /// <summary>
+    /// All carbon on the map: air, plants, litter and seeds.
+    /// </summary>
+    internal double MapCarbonTotal()
+    {
+        double total = atmosphericCarbon;
+        foreach (Vector3Int pos in mapManager.GetAllTilePositions())
+        {
+            total += mapManager.GetTileEnvironmentData(pos).litterCarbon;
+        }
+        foreach (GrassInstance grass in grassManager.activeGrassInstances.Values)
+        {
+            total += grass.structuralCarbon;
+        }
+        foreach (List<Seed> seeds in grassManager.seedManager.activeSeeds.Values)
+        {
+            for (int i = 0; i < seeds.Count; i++)
+            {
+                total += seeds[i].carbon;
+            }
+        }
+        return total;
+    }
+
+    /// <summary>
+    /// Monthly safety net: tops the air back up if the map holds less carbon than it should. Carbon only moves between
+    /// pools, so anything refilled is rounding or a leak; it is logged as carbonRefilled so a real leak still shows.
+    /// </summary>
+    internal void RefillLeakedCarbon()
+    {
+        double leaked = mapCarbonTarget - MapCarbonTotal();
+        if (leaked > 0.0)
+        {
+            atmosphericCarbon += leaked;
+            ResearchCounters.Today.carbonRefilled += leaked;
+        }
     }
 
     /// <summary>
@@ -231,13 +374,26 @@ public class EnvironmentManager : MonoBehaviour
             tile.litterCarbon += carbon;
     }
 
+    /// <summary>
+    /// Empties a tile's decay pool straight into the air, for when its terrain changes and the pool is reset.
+    /// </summary>
+    internal void ReleaseLitterToAtmosphere(EnvironmentData tile)
+    {
+        ReleaseAtmosphericCarbon(tile.litterCarbon);
+        tile.litterCarbon = 0.0;
+    }
+
     private void UpdateNutrientPools(float simTime)
     {
         List<Vector3Int> positions = mapManager.GetAllTilePositions();
         double carbonEmitted = 0.0;
         double litterFraction = System.Math.Min(1.0, System.Math.Max(0.0, litterDecayRate) * simTime);
+        double nitrogenRefill = System.Math.Min(1.0, System.Math.Max(0f, nitrogenRefillRate) * simTime);
+        double phosphorusRefill = System.Math.Min(1.0, System.Math.Max(0f, phosphorusRefillRate) * simTime);
+        double potassiumRefill = System.Math.Min(1.0, System.Math.Max(0f, potassiumRefillRate) * simTime);
+        double settling = System.Math.Min(1.0, System.Math.Max(0f, nutrientSettlingRate) * simTime);
 
-        // Apply litter decay and weathering/deposition per tile.
+        // Apply litter decay and nutrient refill per tile.
         foreach (Vector3Int pos in positions)
         {
             EnvironmentData data = mapManager.GetTileEnvironmentData(pos);
@@ -247,13 +403,9 @@ public class EnvironmentManager : MonoBehaviour
             data.litterCarbon -= litterDecayed;
             carbonEmitted += litterDecayed;
 
-            double landFactor = data.isWater ? 0.25 : 1.0;
-            data.availableNitrogen += System.Math.Max(0f, nitrogenDepositionRate) * landFactor * simTime;
-            if (!data.isWater)
-            {
-                data.availablePhosphorus += System.Math.Max(0f, phosphorusWeatheringRate) * simTime;
-                data.availablePotassium += System.Math.Max(0f, potassiumWeatheringRate) * simTime;
-            }
+            data.availableNitrogen = MoveTowardsInitial(data.availableNitrogen, GetInitialNutrient(pos, Nutrient.Nitrogen), nitrogenRefill, settling);
+            data.availablePhosphorus = MoveTowardsInitial(data.availablePhosphorus, GetInitialNutrient(pos, Nutrient.Phosphorus), phosphorusRefill, settling);
+            data.availablePotassium = MoveTowardsInitial(data.availablePotassium, GetInitialNutrient(pos, Nutrient.Potassium), potassiumRefill, settling);
 
             data.nitrogenTransportDelta = 0.0;
             data.phosphorusTransportDelta = 0.0;
@@ -262,7 +414,7 @@ public class EnvironmentManager : MonoBehaviour
 
         atmosphericCarbon = System.Math.Max(0.0, atmosphericCarbon + carbonEmitted);
 
-        // Runoff carries a small share of dissolved land nutrients into adjacent water.
+        // Erosion carries a small share of land nutrients into adjacent water.
         foreach (Vector3Int pos in positions)
         {
             EnvironmentData source = mapManager.GetTileEnvironmentData(pos);
@@ -390,7 +542,7 @@ public class EnvironmentManager : MonoBehaviour
 
     public float CalculateLandHydration(Vector3Int tilePos)
     {
-        int searchRadius = 4;
+        int searchRadius = coastalHydrationFadeTiles + 1;
         float closestWaterDistance = float.MaxValue;
 
         // Find closest water tile within search radius
@@ -430,15 +582,14 @@ public class EnvironmentManager : MonoBehaviour
         else if (closestWaterDistance <= 1f)
         {
             // Adjacent to water - use max coastal hydration
-            result = Mathf.Min(baseLandHydration + 40f, 100f);
+            result = Mathf.Min(baseLandHydration + coastalHydrationBonus, 100f);
         }
         else
         {
-            // Linear interpolation based on distance
-            // At distance 1: maxCoastalHydration
-            // At distance ~4: baseLandHydration
-            float t = Mathf.Clamp01((closestWaterDistance - 1f) / 3f);
-            float coastalHydration = Mathf.Min(baseLandHydration + 40f, 100f);
+            // Linear interpolation based on distance, from coastal hydration at distance 1 to
+            // baseLandHydration at the end of the fade
+            float t = Mathf.Clamp01((closestWaterDistance - 1f) / coastalHydrationFadeTiles);
+            float coastalHydration = Mathf.Min(baseLandHydration + coastalHydrationBonus, 100f);
             result = Mathf.Lerp(coastalHydration, baseLandHydration, t);
         }
 

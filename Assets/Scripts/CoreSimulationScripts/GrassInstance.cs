@@ -35,10 +35,30 @@ public class GrassInstance
     // structuralCarbon is all the carbon the plant holds: photosynthesis adds to it, respiration releases it, and it goes to
     // litter at death. availableCarbon is an internal budget within that total, not extra carbon: photosynthesis
     // adds to it and building spends it (the carbon stays in the plant), so only structuralCarbon counts towards map totals.
-    internal float structuralCarbon = 0f;
-    internal float availableCarbon = 0f;
+    // Double precision: steady tiny payments round the same way every update, which float turns into a real carbon leak.
+    internal double structuralCarbon = 0.0;
+    internal double availableCarbon = 0.0;
     internal float starchCapacity = 0f;    // Storage developed so far; grows after maturity, up to MaxStarchCapacity
     internal float starchStored = 0f;      // Energy held as starch: filled by surplus photosynthesis, spent by respiration
+    internal float shadeMultiplier = 1f;   // Share of tile light reaching the plant past taller neighbours; set by GrassManager.UpdateShade
+
+    // Height is genetic; what a plant casts over its neighbours also depends on how grown it is
+    internal float Height => genome.GetTraitValue(TraitId.Height);
+    internal float CanopyHeight => Height * grassDensity;
+    private const float SHORTEST_HEIGHT = 0.1f;
+    private const float DEFAULT_HEIGHT = 0.5f;
+    private const float TALLEST_HEIGHT = 1f;
+
+    /// <summary>
+    /// Growth carbon multiplier: x1 at default height, sliding to the given multipliers at the shortest and tallest heights.
+    /// </summary>
+    internal float HeightCarbonMultiplier(float atShortest, float atTallest)
+    {
+        float height = Height;
+        return height < DEFAULT_HEIGHT
+            ? Mathf.Lerp(atShortest, 1f, Mathf.InverseLerp(SHORTEST_HEIGHT, DEFAULT_HEIGHT, height))
+            : Mathf.Lerp(1f, atTallest, Mathf.InverseLerp(DEFAULT_HEIGHT, TALLEST_HEIGHT, height));
+    }
 
     // ---- Energy storage, scaled by size ----
     internal const float MAX_ENERGY_CAPACITY = 100f;        // Capacity at full size; energy thresholds (traits) are written against this
@@ -114,6 +134,9 @@ public class GrassInstance
         public float co2Factor;                // Photosynthesis multiplier from atmospheric CO2
         public float carbonPerEnergy;          // Carbon fixed per unit of energy photosynthesis stores, and needed per unit of energy spent on building
         public float respirationCarbonPerEnergy; // Carbon released per unit of starch respired
+        public float storageCarbonUpkeep;      // Carbon released per unit of starch capacity per sim second
+        public float shortestGrowthCarbon;     // Carbon cost of growth at the shortest height, relative to default height
+        public float tallestGrowthCarbon;      // Carbon cost of growth at the tallest height, relative to default height
     }
     
     // [OPTIMIZED] Cached plant type for performance (never changes per genome)
@@ -195,13 +218,15 @@ public class GrassInstance
         PhotosynthesisFactors factors = new PhotosynthesisFactors();
 
         // Calculate photosynthesis based on environment
-        factors.lightEfficiency = Mathf.Clamp01(environmentData.light / lightRequirement);
+        // Shade dims the light itself, so a lower LightRequirement doubles as shade tolerance
+        float light = environmentData.light * shadeMultiplier;
+        factors.lightEfficiency = Mathf.Clamp01(light / lightRequirement);
         factors.hydrationEfficiency = Mathf.Clamp01(environmentData.hydration / hydrationRequirement);
 
         // Penalty for excess light
-        if (environmentData.light > lightRequirement + 0.1f)
+        if (light > lightRequirement + 0.1f)
         {
-            factors.lightEfficiency -= environmentData.light - lightRequirement - 0.1f;
+            factors.lightEfficiency -= light - lightRequirement - 0.1f;
         }
 
         // Penalty for excess hydration
@@ -452,6 +477,7 @@ public class GrassInstance
         energyStored -= actualMetabolismCost * grassDensity * time;
 
         ExchangeCarbon(carbonContext, photosynthesisEnergy, respirationEnergy);
+        PayStorageUpkeep(carbonContext, time);
 
         // [OPTIMIZED] Compute growth expense inline
         float growthExpense = baseGrowthCost * grassDensity * nightEffect * time;
@@ -470,7 +496,7 @@ public class GrassInstance
                 densityGrowthCost *= (1 - seedingProportion); // Adjust energy cost by seeding proportion
             }
 
-            if (TrySpendCarbon(densityGrowthCost, carbonContext))
+            if (TrySpendCarbon(densityGrowthCost * HeightCarbonMultiplier(carbonContext.shortestGrowthCarbon, carbonContext.tallestGrowthCarbon), carbonContext))
             {
                 energyStored -= densityGrowthCost;
                 // [OPTIMIZED] Use cached growthRate instead of repeated GetTraitValue() call
@@ -553,17 +579,40 @@ public class GrassInstance
 
         if (photosynthesisEnergy > 0f)
         {
-            float fixedCarbon = (float)context.environment.TakeAtmosphericCarbon(photosynthesisEnergy * context.carbonPerEnergy);
+            double fixedCarbon = context.environment.TakeAtmosphericCarbon((double)photosynthesisEnergy * context.carbonPerEnergy);
             structuralCarbon += fixedCarbon;
             availableCarbon += fixedCarbon;
         }
 
-        float released = Mathf.Min(structuralCarbon, respirationEnergy * context.respirationCarbonPerEnergy);
-        if (released > 0f)
+        double released = System.Math.Min(structuralCarbon, (double)respirationEnergy * context.respirationCarbonPerEnergy);
+        if (released > 0.0)
         {
             structuralCarbon -= released;
-            availableCarbon = Mathf.Max(0f, availableCarbon - released);
+            availableCarbon = System.Math.Max(0.0, availableCarbon - released);
             context.environment.ReleaseAtmosphericCarbon(released);
+        }
+    }
+
+    /// <summary>
+    /// Starch storage costs carbon to keep, in proportion to its capacity whether full or empty; the carbon returns to
+    /// the air. It is paid from the budget: a plant without enough available carbon loses the capacity it couldn't pay for.
+    /// </summary>
+    private void PayStorageUpkeep(PlantCarbonContext context, float time)
+    {
+        if (context.environment == null || starchCapacity <= 0f)
+            return;
+
+        double upkeep = (double)starchCapacity * context.storageCarbonUpkeep * dormancyEffect * time;
+        double paid = System.Math.Min(availableCarbon, upkeep);
+        availableCarbon -= paid;
+        structuralCarbon -= paid;
+        context.environment.ReleaseAtmosphericCarbon(paid);
+
+        double unpaid = upkeep - paid;
+        if (unpaid > 0.0 && context.carbonPerEnergy > 0f)
+        {
+            starchCapacity = Mathf.Max(0f, starchCapacity - (float)(unpaid / context.carbonPerEnergy));
+            starchStored = Mathf.Min(starchStored, starchCapacity);
         }
     }
 
@@ -577,7 +626,7 @@ public class GrassInstance
         if (context.environment == null)
             return true;
 
-        float carbonCost = energyCost * context.carbonPerEnergy;
+        double carbonCost = (double)energyCost * context.carbonPerEnergy;
         if (availableCarbon < carbonCost)
             return false;
 
@@ -589,7 +638,7 @@ public class GrassInstance
     /// Adds carbon a new plant starts with (from its seed, parent, or the air): ready to build with, so a plant starting
     /// with energy above its capacity can grow before photosynthesis has anywhere to store energy.
     /// </summary>
-    internal void ReceiveCarbon(float carbon)
+    internal void ReceiveCarbon(double carbon)
     {
         structuralCarbon += carbon;
         availableCarbon += carbon;
@@ -598,11 +647,11 @@ public class GrassInstance
     /// <summary>
     /// Removes up to the requested carbon for a clone, from the plant and its budget. Returns the amount removed.
     /// </summary>
-    internal float TakeCarbon(float requested)
+    internal double TakeCarbon(double requested)
     {
-        float taken = Mathf.Clamp(requested, 0f, structuralCarbon);
+        double taken = System.Math.Max(0.0, System.Math.Min(requested, structuralCarbon));
         structuralCarbon -= taken;
-        availableCarbon = Mathf.Max(0f, availableCarbon - taken);
+        availableCarbon = System.Math.Max(0.0, availableCarbon - taken);
         return taken;
     }
 
@@ -610,11 +659,11 @@ public class GrassInstance
     /// Removes the carbon built into seeds. The budget already paid for it while seeding (see TrySpendCarbon),
     /// so only the plant's total drops. Returns the amount removed.
     /// </summary>
-    internal float TakeSeedCarbon(float requested)
+    internal double TakeSeedCarbon(double requested)
     {
-        float taken = Mathf.Clamp(requested, 0f, structuralCarbon);
+        double taken = System.Math.Max(0.0, System.Math.Min(requested, structuralCarbon));
         structuralCarbon -= taken;
-        availableCarbon = Mathf.Min(availableCarbon, structuralCarbon);
+        availableCarbon = System.Math.Min(availableCarbon, structuralCarbon);
         return taken;
     }
 

@@ -8890,6 +8890,7 @@ MonoBehaviour:
   - {fileID: 11400000, guid: 343b4ceb335b45cfb2969ab991a4cffd, type: 2}
   - {fileID: 11400000, guid: fae69e81447c4cb082ca7448cda35bc8, type: 2}
   - {fileID: 11400000, guid: 40b49608d33a42a68f8d11b08e2df6a9, type: 2}
+  - {fileID: 11400000, guid: 323139f21e124915864b35ea26544e4b, type: 2}
 --- !u!114 &876398468
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -10187,7 +10188,7 @@ MonoBehaviour:
   nitrogenDepositionRate: 0.00001
   phosphorusWeatheringRate: 0.000002
   potassiumWeatheringRate: 0.000005
-  nutrientLeachingRate: 0.0001
+  nutrientLeachingRate: 0.000005
   mapManager: {fileID: 1471658979}
   grassManager: {fileID: 876398464}
   environmentVisualizer: {fileID: 1064579891}

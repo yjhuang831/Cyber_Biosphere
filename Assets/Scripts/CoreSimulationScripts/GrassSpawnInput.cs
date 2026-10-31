@@ -19,6 +19,15 @@ public class GrassSpawnInput : MonoBehaviour
             }
         }
 
+        // T: random terrain (ignored while typing, since one stray letter would replace the map)
+        if (Input.GetKeyDown(KeyCode.T) && !IsTypingInInputField())
+        {
+            if (mapManager != null && mapManager.allowTileModification)
+            {
+                mapManager.GenerateRandomTerrain();
+            }
+        }
+
         if (Input.GetKeyDown(KeyCode.G))
         {
             if (mapManager == null || grassManager == null || !mapManager.allowTileModification)
