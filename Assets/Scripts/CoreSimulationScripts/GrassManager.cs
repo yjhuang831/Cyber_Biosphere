@@ -23,7 +23,7 @@ public class GrassManager : MonoBehaviour
     [Header("Breeding and Genera")]
     [Tooltip("Genetic distance at which two plants can no longer breed; below it, pollination odds fall in proportion to distance. " +
              "Unrelated wild plants average about 0.55. Lower = more genera, sooner.")]
-    [Min(0.01f)] public float maxBreedingDistance = 0.4f;
+    [Min(0.01f)] public float maxBreedingDistance = 0.35f;
 
     [Header("Quick Start")]
     [Tooltip("Share of map tiles SpawnRandomGrasses plants, e.g. 0.02 = 2% of tiles (18 plants on a 30x30 map).")]
@@ -57,6 +57,7 @@ public class GrassManager : MonoBehaviour
     internal long plantCount = 0;
 
     internal readonly GenusTracker genusTracker = new GenusTracker();
+    private readonly List<GrassInstance> plantsToUpdate = new List<GrassInstance>();
     private readonly List<PlantGenome> plantGenomesScratch = new List<PlantGenome>();
     private readonly List<PlantGenome> seedGenomesScratch = new List<PlantGenome>();
     private const int NEIGHBORS_PER_TILE = 8;
@@ -89,74 +90,75 @@ public class GrassManager : MonoBehaviour
             UpdateShade();
         }
 
-        using (var pooled = GetPooledPositions())
+        // Copied because plants are added and removed during the pass
+        plantsToUpdate.Clear();
+        plantsToUpdate.AddRange(activeGrassInstances.Values);
+
+        for (int i = 0; i < plantsToUpdate.Count; i++)
         {
-            List<Vector3Int> activePositions = pooled.List;
-            activePositions.AddRange(activeGrassInstances.Keys);
+            GrassInstance grassInstance = plantsToUpdate[i];
+            Vector3Int tilePos = grassInstance.tilePosition;
 
-            foreach (var tilePos in activePositions) // Use pooled list to avoid allocation during iteration
+            // Get the corresponding environment data
+            EnvironmentData data = mapManager.GetTileEnvironmentData(tilePos);
+
+            // Check if the grass still exists (may have been removed)
+            if (data.grass != grassInstance)
+                continue;
+
+            CheckGrassState(tilePos, data); // Ensure grass state is updated before metabolism
+
+            if (data.grass == null)
+                continue; // Grass may have died during state check
+
+            if (TimeController.accumulatedAge > 0)
             {
-                // Check if the grass still exists (may have been removed)
-                if (!activeGrassInstances.TryGetValue(tilePos, out GrassInstance grassInstance))
-                    continue;
-
-                // Get the corresponding environment data
-                EnvironmentData data = mapManager.GetTileEnvironmentData(tilePos);
-                
-                CheckGrassState(tilePos, data); // Ensure grass state is updated before metabolism
-
-                if (data.grass == null)
-                    continue; // Grass may have died during state check
-
-                if (TimeController.accumulatedAge > 0)
+                grassInstance.age = IncrementWithWrap(grassInstance.age);
+                if (grassInstance.IsFlowering)
                 {
-                    grassInstance.age = IncrementWithWrap(grassInstance.age);
-                    if (grassInstance.IsFlowering)
-                    {
-                        grassInstance.floweringDays = IncrementWithWrap(grassInstance.floweringDays);
-                    }
-                    grassInstance.ApplyDailyAgeing(plantAging, agingRate, TimeController.fullDayLength);
+                    grassInstance.floweringDays = IncrementWithWrap(grassInstance.floweringDays);
+                }
+                grassInstance.ApplyDailyAgeing(plantAging, agingRate, TimeController.fullDayLength);
 
-                    // After the day's ageing (which reflects yesterday's state), decide dormancy from yesterday's daylight
-                    grassInstance.DailyDormancyDecision();
-                }
+                // After the day's ageing (which reflects yesterday's state), decide dormancy from yesterday's daylight
+                grassInstance.DailyDormancyDecision();
+            }
 
-                grassInstance.PerformMetabolism(data, metabolismCostPerAllele, simTime, baseGrowthCost, TimeController.isNight, carbonContext);
+            grassInstance.PerformMetabolism(data, metabolismCostPerAllele, simTime, baseGrowthCost, TimeController.isNight, carbonContext);
 
-                // Check if grass should reproduce (handles energy deduction internally)
-                if (!grassInstance.IsDormant && grassInstance.CheckAndHandleSpread() && TryUseCloneAttempt(grassInstance))
-                {
-                    SpreadIndividualGrass(tilePos, data);
-                }
-                if (grassInstance.floweringDays > 0 && !grassInstance.IsFlowering)
-                {
-                    grassInstance.floweringDays = 0;
-                }
-                // Self-pollination is rolled once per day, on the same daily tick as pollen spread
-                if (TimeController.accumulatedAge > 0 && grassInstance.IsFlowering && grassInstance.floweringDays > 0)
-                {
-                    SelfPollinate(grassInstance, tilePos);
-                }
-                bool startedFloweringThisTick = false;
-                // Check if grass should flower
-                if (!grassInstance.IsDormant && !grassInstance.IsFlowering && !grassInstance.IsSeeding && grassInstance.CheckFlowering())
-                {
-                    startedFloweringThisTick = Flower(grassInstance, tilePos);
-                    if (startedFloweringThisTick)
-                    {
-                        SpreadPollen(grassInstance, tilePos);
-                    }
-                }
-                // Spread pollen once per day while flowering
-                if (TimeController.accumulatedAge > 0 && grassInstance.IsFlowering && !startedFloweringThisTick)
+            // Check if grass should reproduce (handles energy deduction internally)
+            if (!grassInstance.IsDormant && grassInstance.CheckAndHandleSpread() && TryUseCloneAttempt(grassInstance))
+            {
+                SpreadIndividualGrass(tilePos, data);
+            }
+            if (grassInstance.floweringDays > 0 && !grassInstance.IsFlowering)
+            {
+                grassInstance.floweringDays = 0;
+            }
+            // Self-pollination is rolled once per day, on the same daily tick as pollen spread
+            if (TimeController.accumulatedAge > 0 && grassInstance.IsFlowering && grassInstance.floweringDays > 0)
+            {
+                SelfPollinate(grassInstance, tilePos);
+            }
+            bool startedFloweringThisTick = false;
+            // Check if grass should flower
+            if (!grassInstance.IsDormant && !grassInstance.IsFlowering && !grassInstance.IsSeeding && grassInstance.CheckFlowering())
+            {
+                startedFloweringThisTick = Flower(grassInstance, tilePos);
+                if (startedFloweringThisTick)
                 {
                     SpreadPollen(grassInstance, tilePos);
                 }
-                // Check if seed is ready
-                if (grassInstance.IsSeeding && grassInstance.seedingEnergy >= grassInstance.genome.GetTraitValue(TraitId.SeedEnergyThreshold))
-                {
-                    DisperseSeed(grassInstance, tilePos);
-                }
+            }
+            // Spread pollen once per day while flowering
+            if (TimeController.accumulatedAge > 0 && grassInstance.IsFlowering && !startedFloweringThisTick)
+            {
+                SpreadPollen(grassInstance, tilePos);
+            }
+            // Check if seed is ready
+            if (grassInstance.IsSeeding && grassInstance.seedingEnergy >= grassInstance.genome.GetTraitValue(TraitId.SeedEnergyThreshold))
+            {
+                DisperseSeed(grassInstance, tilePos);
             }
         }
 

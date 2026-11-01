@@ -12,8 +12,12 @@ public class EnvironmentManager : MonoBehaviour
 
     public float minTemperature = -80f;
     public float maxTemperature = 60f;
-    public float equatorialBoost = 5f;
-    public float polarPenalty = -5f;
+    public float equatorialBoost = 8f;   // Temperature change at the equator, across the middle of the map
+    public float polarPenalty = -8f;     // Temperature change at the north and south edges
+    [Tooltip("Share of the seasonal temperature change felt at the equator.")]
+    [Min(0f)] public float equatorSeasonStrength = 0.4f;
+    [Tooltip("Share of the seasonal temperature change felt at the north and south edges.")]
+    [Min(0f)] public float poleSeasonStrength = 1.3f;
 
     [Header("Hydration Settings")]
     public float baseLandHydration = 20f;
@@ -52,7 +56,9 @@ public class EnvironmentManager : MonoBehaviour
     internal double mapCarbonTarget = 0.0; // The map's total carbon: set when a new map starts, restored by RefillLeakedCarbon
 
     [Header("Atmospheric CO2 and Photosynthesis")]
-    [Tooltip("Atmospheric carbon per map tile at which photosynthesis runs at its normal rate (x1). New maps start at this level.")]
+    [Tooltip("Atmospheric carbon per map tile on a new map. Above the reference level below, photosynthesis starts a little over x1.")]
+    [Min(0f)] public float startingAtmosphericCarbonPerTile = 24f;
+    [Tooltip("Atmospheric carbon per map tile at which photosynthesis runs at its normal rate (x1).")]
     [Min(0.01f)] public float referenceAtmosphericCarbonPerTile = 50f;
     [Tooltip("Half-saturation of the CO2 response, as a fraction of the reference level. Photosynthesis is x1 at the reference, " +
              "falls toward 0 as CO2 runs out, and approaches x(1 + this) when CO2 is plentiful.")]
@@ -83,6 +89,8 @@ public class EnvironmentManager : MonoBehaviour
     [Tooltip("Share of an oxygen difference moved to each lower neighbour per simulated second, before the land (0.2) / water (0.1) rate.")]
     [Min(0f)] public float oxygenDiffusionCoefficient = 0.01f;
 
+    private float lastTileLightLevel = -1f;   // What the last map-wide tile pass used
+    private float lastTileSeasonOffset = float.NaN;
     private float nutrientTimeAccumulator;
     private const float NUTRIENT_UPDATE_INTERVAL = 10f;
     private float oxygenTimeAccumulator;
@@ -108,6 +116,44 @@ public class EnvironmentManager : MonoBehaviour
         waterLightLevel = Mathf.Min(baseLightLevel, waterMaxLightLevel);
         landLightLevel = Mathf.Min(baseLightLevel, landMaxLightLevel);
 
+        // Tile light and temperature only follow these two between terrain or settings edits (which pass
+        // skipHydrationUpdate false or a position), and both hold still through most of the day and night
+        bool tilesUnchanged = skipHydrationUpdate && !centerPosition.HasValue
+            && baseLightLevel == lastTileLightLevel && seasonalTemperatureOffset == lastTileSeasonOffset;
+        if (!centerPosition.HasValue)
+        {
+            lastTileLightLevel = baseLightLevel;
+            lastTileSeasonOffset = seasonalTemperatureOffset;
+        }
+
+        if (!tilesUnchanged)
+        {
+            RefreshTiles(centerPosition, skipHydrationUpdate);
+        }
+
+        if (simTime > 0f)
+        {
+            nutrientTimeAccumulator += simTime;
+            if (nutrientTimeAccumulator >= NUTRIENT_UPDATE_INTERVAL)
+            {
+                float elapsed = nutrientTimeAccumulator;
+                nutrientTimeAccumulator = 0f;
+                UpdateNutrientPools(elapsed);
+            }
+        }
+
+        // Diffusion runs less often than this update, so integrate over all the time elapsed since the last pass
+        if (simTime > 0f)
+            oxygenTimeAccumulator += simTime;
+        if (distributeOxygen && oxygenTimeAccumulator > 0f)
+        {
+            DistributeOxygen(oxygenTimeAccumulator);
+            oxygenTimeAccumulator = 0f;
+        }
+    }
+
+    private void RefreshTiles(Vector3Int? centerPosition, bool skipHydrationUpdate)
+    {
         float mapHeight = mapManager.height;
 
         using (var pooled = grassManager.GetPooledPositions())
@@ -156,26 +202,6 @@ public class EnvironmentManager : MonoBehaviour
                 RecalculateTemperature(tilePos, data, mapHeight);
 
             }
-        }
-
-        if (simTime > 0f)
-        {
-            nutrientTimeAccumulator += simTime;
-            if (nutrientTimeAccumulator >= NUTRIENT_UPDATE_INTERVAL)
-            {
-                float elapsed = nutrientTimeAccumulator;
-                nutrientTimeAccumulator = 0f;
-                UpdateNutrientPools(elapsed);
-            }
-        }
-
-        // Diffusion runs less often than this update, so integrate over all the time elapsed since the last pass
-        if (simTime > 0f)
-            oxygenTimeAccumulator += simTime;
-        if (distributeOxygen && oxygenTimeAccumulator > 0f)
-        {
-            DistributeOxygen(oxygenTimeAccumulator);
-            oxygenTimeAccumulator = 0f;
         }
     }
 
@@ -319,11 +345,11 @@ public class EnvironmentManager : MonoBehaviour
     }
 
     /// <summary>
-    /// Starting atmosphere for a freshly generated map (not for loads): the reference level on every tile.
+    /// Starting atmosphere for a freshly generated map (not for loads): the starting level on every tile.
     /// </summary>
     internal void ResetAtmosphereForNewMap()
     {
-        atmosphericCarbon = (double)referenceAtmosphericCarbonPerTile * TileCount;
+        atmosphericCarbon = (double)startingAtmosphericCarbonPerTile * TileCount;
         mapCarbonTarget = atmosphericCarbon;
     }
 
@@ -481,15 +507,17 @@ public class EnvironmentManager : MonoBehaviour
         // This is completely static and doesn't need to recalculate every frame
         if (!data.staticTempOffsetCalculated)
         {
-            Vector3Int mapCenterOffset = new Vector3Int(mapManager.width / 2, mapManager.height / 2, 0);
-            float latitude = Mathf.Abs(tilePos.y + mapCenterOffset.y) / mapHeight;
+            // 0 at the equator, 1 at the north and south edges
+            float distanceFromEquator = Mathf.Abs(tilePos.y + mapManager.height / 2 + 0.5f - mapHeight / 2f);
+            float latitude = Mathf.Clamp01(distanceFromEquator / (mapHeight / 2f));
             float latitudeEffect = Mathf.PerlinNoise(tilePos.x * 0.1f, tilePos.y * 0.1f) * 2 - 1;
-            data.cachedStaticTempOffset = (equatorialBoost * (1 - latitude)) + (polarPenalty * latitude) + latitudeEffect;
+            data.cachedStaticTempOffset = Mathf.Lerp(equatorialBoost, polarPenalty, latitude) + latitudeEffect;
+            data.cachedSeasonStrength = Mathf.Lerp(equatorSeasonStrength, poleSeasonStrength, latitude);
             data.staticTempOffsetCalculated = true;
         }
         
         // Base temperature from seasonal and static offsets
-        float temperature = baseTemperature + data.cachedStaticTempOffset + seasonalTemperatureOffset;
+        float temperature = baseTemperature + data.cachedStaticTempOffset + seasonalTemperatureOffset * data.cachedSeasonStrength;
 
         // Apply temperature offsets proportionally based on hydration and light
         // Hydration effect: 100% hydration = 100% of hydroOffset applied

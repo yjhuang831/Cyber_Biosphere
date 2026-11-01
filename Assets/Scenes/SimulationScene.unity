@@ -8821,7 +8821,7 @@ MonoBehaviour:
   baseGrowthCost: 0.5
   flowerLimit: 1
   maxCloneAttemptsPerDay: 0
-  maxBreedingDistance: 0.4
+  maxBreedingDistance: 0.35
   quickStartGrassFraction: 0.02
   carbonPerEnergy: 0.01
   respirationCarbonPerEnergy: 0.02
@@ -10157,8 +10157,8 @@ MonoBehaviour:
   lightOffset: -5
   minTemperature: -80
   maxTemperature: 60
-  equatorialBoost: 2
-  polarPenalty: -2
+  equatorialBoost: 8
+  polarPenalty: -8
   baseLandHydration: 20
   waterLightLevel: 0
   landLightLevel: 0

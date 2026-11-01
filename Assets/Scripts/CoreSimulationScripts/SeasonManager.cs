@@ -8,6 +8,8 @@ public class SeasonManager : MonoBehaviour
 {
     [Header("Seasonal Settings")]
     public int monthsPerTransition = 1;
+    [Tooltip("On: seasons follow the yearly calendar, and season buttons jump the calendar. Off: seasons only change by hand.")]
+    public bool rotateSeasons = true;
     internal static int daysPerYear = 360;
     private int currentSeason = 0; // 0: Spring, 1: Summer, 2: Fall, 3: Winter
 
@@ -26,6 +28,10 @@ public class SeasonManager : MonoBehaviour
     private bool isDragging = false;
     private int hoverSeason = -1;
     internal int DAYS_PER_MONTH = 30;
+    private int calendarOffsetDays = 0;   // Calendar day minus sim day; changed by jumping to a season
+    private long lastCalendarDay = -1;    // Sim day the calendar last applied
+
+    internal int CalendarOffsetDays => calendarOffsetDays;
 
     void Awake()
     {
@@ -44,6 +50,63 @@ public class SeasonManager : MonoBehaviour
         RegisterSeasonButtons();
         UpdateSeasonButtonVisuals();
         ConfigureProgressSlider();
+    }
+
+    void Update()
+    {
+        if (rotateSeasons && TimeController.simDaysSinceStart != lastCalendarDay)
+        {
+            ApplyCalendar();
+        }
+    }
+
+    private int DaysPerSeason => Mathf.Max(1, daysPerYear / seasons.Count);
+
+    /// <summary>
+    /// Sets temperature and daylight from the calendar: each season peaks on its first day, with day 0 of the year
+    /// at Spring's, and conditions ease from one peak to the next. Worked out from the day, so nothing drifts or needs saving.
+    /// </summary>
+    private void ApplyCalendar()
+    {
+        lastCalendarDay = TimeController.simDaysSinceStart;
+
+        int calendarDay = (int)((lastCalendarDay + calendarOffsetDays) % daysPerYear);
+        int fromSeason = Mathf.Min(calendarDay / DaysPerSeason, seasons.Count - 1);
+        int toSeason = (fromSeason + 1) % seasons.Count;
+        float t = (calendarDay - fromSeason * DaysPerSeason) / (float)DaysPerSeason;
+        float eased = 0.5f - 0.5f * Mathf.Cos(Mathf.PI * t);
+        ApplySeasonBlend(seasons[fromSeason].targetTemperature, seasons[toSeason].targetTemperature,
+            seasons[fromSeason].targetNoonLength, seasons[toSeason].targetNoonLength, eased);
+
+        int nearestSeason = t < 0.5f ? fromSeason : toSeason;
+        if (nearestSeason != currentSeason)
+        {
+            currentSeason = nearestSeason;
+            UpdateSeasonButtonVisuals();
+        }
+        SetProgressSlider(calendarDay / (float)daysPerYear, true);
+    }
+
+    private void JumpCalendarToSeason(int seasonIndex)
+    {
+        long target = seasonIndex * DaysPerSeason - TimeController.simDaysSinceStart;
+        calendarOffsetDays = (int)((target % daysPerYear + daysPerYear) % daysPerYear);
+        ApplyCalendar();
+    }
+
+    /// <summary>
+    /// Switches between rotating and manual seasons. Rotation resumes from the current season; going manual keeps
+    /// today's conditions until a season is chosen. Public for wiring to a UI button.
+    /// </summary>
+    public void ToggleSeasonRotation()
+    {
+        StopSeasonTransition();
+        rotateSeasons = !rotateSeasons;
+        if (rotateSeasons)
+        {
+            JumpCalendarToSeason(currentSeason);
+        }
+        Debug.Log("Season rotation " + (rotateSeasons ? "on" : "off"));
     }
 
     private void RegisterSeasonButtons()
@@ -89,13 +152,19 @@ public class SeasonManager : MonoBehaviour
         if (seasonIndex == currentSeason)
             return;
 
+        if (rotateSeasons)
+        {
+            JumpCalendarToSeason(seasonIndex);
+            return;
+        }
+
         StopSeasonTransition();
         ApplySeasonImmediate(seasonIndex);
     }
 
     private void OnSeasonPointerDown(int seasonIndex)
     {
-        if (seasonIndex != currentSeason)
+        if (rotateSeasons || seasonIndex != currentSeason)
             return;
         if (seasonTransitionRoutine != null)
             return;
@@ -204,12 +273,15 @@ public class SeasonManager : MonoBehaviour
     /// <summary>
     /// Restores the selected season after a load. The loader has already restored the temperature offset and
     /// noon length (possibly mid-transition values), so this only updates the selection and UI; an in-progress
-    /// transition is not resumed.
+    /// transition is not resumed. Saves from before rotation existed load with it off.
     /// </summary>
-    internal void ApplyLoadedSeason(int seasonIndex)
+    internal void ApplyLoadedSeason(int seasonIndex, bool rotating, int calendarOffset)
     {
         StopSeasonTransition();
         currentSeason = Mathf.Clamp(seasonIndex, 0, seasons.Count - 1);
+        rotateSeasons = rotating;
+        calendarOffsetDays = calendarOffset;
+        lastCalendarDay = -1;
         UpdateSeasonButtonVisuals();
     }
 

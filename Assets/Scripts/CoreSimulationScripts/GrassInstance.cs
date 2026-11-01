@@ -41,6 +41,7 @@ public class GrassInstance
     internal float starchCapacity = 0f;    // Storage developed so far; grows after maturity, up to MaxStarchCapacity
     internal float starchStored = 0f;      // Energy held as starch: filled by surplus photosynthesis, spent by respiration
     internal float shadeMultiplier = 1f;   // Share of tile light reaching the plant past taller neighbours; set by GrassManager.UpdateShade
+    internal int drawnAppearance = -1;     // Appearance MapManager last drew for this plant
 
     // Height is genetic; what a plant casts over its neighbours also depends on how grown it is
     internal float Height => genome.GetTraitValue(TraitId.Height);
@@ -348,6 +349,11 @@ public class GrassInstance
                 budget.respiration = CalculateRespirationRate(eData);
             }
         }
+        else if (CanRespire)
+        {
+            budget.respirationOn = true;
+            budget.respiration = CalculateRespirationRate(eData);
+        }
 
         float costScale = dormancyEffect * nightEffect * grassDensity;
         budget.geneUpkeep = metabolismCostPerAllele * genome.expressedLocusCount * costScale;
@@ -470,6 +476,13 @@ public class GrassInstance
                 energyStored += respirationEnergy;
                 usedRespirationLastTick = true;
             }
+        }
+        else if (CanRespire)
+        {
+            // Dormant plants live off their starch, day or night, at the slowed rate dormancyEffect gives
+            respirationEnergy = Respiration(eData, time);
+            energyStored += respirationEnergy;
+            usedRespirationLastTick = true;
         }
 
         // [OPTIMIZED] Compute metabolism cost inline to avoid method call overhead

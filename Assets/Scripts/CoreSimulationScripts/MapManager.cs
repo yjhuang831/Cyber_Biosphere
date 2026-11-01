@@ -245,6 +245,10 @@ public class MapManager : MonoBehaviour
         }
 
         isInitialized = true;
+        if (cameraController != null)
+        {
+            cameraController.FitToMap(width, height);
+        }
         environmentManager.UpdateTileEnvironment(null, true);
         // [OPTIMIZED] Static temperature offsets cached during above fullUpdate
     }
@@ -457,6 +461,13 @@ public class MapManager : MonoBehaviour
             return;
         }
 
+        // Runs for every plant every update, and appearance rarely changes
+        GrassInstance grass = data.grass;
+        int appearance = GrowthStage(grass.grassDensity) | (grass.IsDormant ? 4 : 0) | (grass.IsFlowering ? 8 : 0) | (grass.IsSeeding ? 16 : 0);
+        if (appearance == grass.drawnAppearance)
+            return;
+        grass.drawnAppearance = appearance;
+
         string plantType = data.grass.GetCachedPlantType();
         TileBase grassStageTypeTile = GetGrassStageTypeTile(
             data.grass.grassDensity,
@@ -494,19 +505,20 @@ public class MapManager : MonoBehaviour
     }
 
     /// <summary>
+    /// Growth stage shown for a density: 0 young, 1 medium, 2 mature.
+    /// </summary>
+    private static int GrowthStage(float grassDensity)
+    {
+        return grassDensity < 0.3f ? 0 : grassDensity < 0.7f ? 1 : 2;
+    }
+
+    /// <summary>
     /// Gets the appropriate grass tile based on growth stage and plant type.
     /// Returns null if no tile is assigned for the current state.
     /// </summary>
     public TileBase GetGrassStageTypeTile(float grassDensity, string plantType, bool isDormant, bool isFlowering = false, bool isSeeding = false)
     {
-        // Determine growth stage from density
-        int stageIndex;
-        if (grassDensity < 0.3f)
-            stageIndex = 0; // young
-        else if (grassDensity < 0.7f)
-            stageIndex = 1; // medium
-        else
-            stageIndex = 2; // mature
+        int stageIndex = GrowthStage(grassDensity);
 
         // Determine plant type and get the corresponding tile array
         TileBase[] plantTypeTiles = plantType switch

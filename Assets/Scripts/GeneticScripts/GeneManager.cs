@@ -18,11 +18,11 @@ public class GeneManager : MonoBehaviour
     private const float CROSSOVER_RATE = 0.15f;   // Chance of switching strand at each homologous pair during meiosis
 
     // Per-gene mutation chance per unit of radiation during gamete formation.
-    // Land radiation 0.2 gives 0.016 per gene: about 1 mutation per seed carrying ~60 gene copies.
-    private const float MUTATION_RATE_PER_RADIATION = 0.08f;
+    // Land radiation 0.2 gives 0.02 per gene: about 1.2 mutations per seed carrying ~60 gene copies.
+    private const float MUTATION_RATE_PER_RADIATION = 0.1f;
     private const float DOMINANCE_FLIP_SHARE = 0.2f;              // Dominance flips at this share of the value mutation rate
     private const float MUTATION_STEP_PER_RADIATION = 5f;         // Typical allele change per unit of radiation (at least 1)
-    private const float STRUCTURAL_CHANCE_PER_RADIATION = 0.05f;  // Chance per copied strand of gaining, losing, or swapping a locus
+    private const float STRUCTURAL_CHANCE_PER_RADIATION = 0.06f;  // Chance per copied strand of gaining, losing, or swapping a locus
 
     // Cloning is the conservative strategy: it copies DNA with this share of the radiation a gamete experiences,
     // which means rarer changes and always the smallest step. Seeds are the source of larger variation.

@@ -27,7 +27,7 @@ public class TimeController : MonoBehaviour
     private float grassUpdateInterval = 0.4f;
     private float oxygenDiffusionInterval = 10f;
     private float pruneInterval = 30f; // Prune species every 30 real seconds
-    private float visualUpdateInterval = 0.033f; // Refresh overlays at roughly 30 Hz without tying them to render FPS.
+    private float visualUpdateInterval = 0.1f; // Refresh overlays at 10 Hz: each refresh visits every tile, and they change slowly.
     private float dayNightInterval = 0.2f; // Update day-night cycle every 0.2 sim seconds
 
     [Header("Seeds")]

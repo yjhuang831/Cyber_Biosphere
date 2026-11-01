@@ -44,6 +44,8 @@ public class EnvironmentData
     public bool staticTempOffsetCalculated = false;
     [System.NonSerialized]
     public float cachedStaticTempOffset = 0f;
+    [System.NonSerialized]
+    public float cachedSeasonStrength = 1f;  // How strongly seasons reach this latitude
 
     // [OPTIMIZED] Visualization color caching - avoid redundant tilemap updates
     [System.NonSerialized]

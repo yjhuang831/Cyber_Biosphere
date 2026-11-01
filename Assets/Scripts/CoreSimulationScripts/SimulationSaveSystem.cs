@@ -135,6 +135,8 @@ public static class SimulationSaveSystem
         timeController.WriteTimeState(snapshot.time);
         SeasonManager seasonManager = UnityEngine.Object.FindFirstObjectByType<SeasonManager>();
         snapshot.time.currentSeason = seasonManager != null ? seasonManager.CurrentSeason : 0;
+        snapshot.time.seasonRotating = seasonManager != null && seasonManager.rotateSeasons;
+        snapshot.time.seasonCalendarOffsetDays = seasonManager != null ? seasonManager.CalendarOffsetDays : 0;
 
         // Genomes are written once each; reference equality dedupes seeds sharing a parent's seed genome
         GenomeTableWriter genomeTable = new GenomeTableWriter(snapshot.genomes);

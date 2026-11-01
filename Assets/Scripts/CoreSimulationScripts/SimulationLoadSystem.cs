@@ -466,7 +466,7 @@ public static class SimulationLoadSystem
                 int season = hasExactDayPhase
                     ? snapshot.time.currentSeason
                     : seasonManager.FindClosestSeasonByTemperature(environmentManager.seasonalTemperatureOffset);
-                seasonManager.ApplyLoadedSeason(season);
+                seasonManager.ApplyLoadedSeason(season, snapshot.time.seasonRotating, snapshot.time.seasonCalendarOffsetDays);
             }
         }
 

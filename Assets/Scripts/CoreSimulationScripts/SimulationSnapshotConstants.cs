@@ -3,7 +3,7 @@ using System.Collections.Generic;
 
 internal static class SimulationSnapshotConstants
 {
-    public const int SchemaVersion = 17;
+    public const int SchemaVersion = 18;
     public const int MinimumSupportedSchemaVersion = 6;
     public const string AutosaveFolder = "Autosaves";
     public const string ManualSaveFolder = "ManualSaves";
@@ -83,6 +83,8 @@ internal class TimeState
     public float daySimTime;
     public int germinationStepsDoneToday;
     public int currentSeason;
+    public bool seasonRotating;           // Schema 18+
+    public int seasonCalendarOffsetDays;  // Schema 18+
 }
 
 [Serializable]

@@ -869,9 +869,8 @@ public class DetailedInformationPanelController : MonoBehaviour
 
     private static string RespirationOffReason(GrassInstance grass, EnvironmentData envData)
     {
-        if (grass.IsDormant) return "dormant";
         if (grass.energyStored >= grass.EnergyCapacity) return "energy full";
-        if (envData.light > LIGHT_ACTIVITY_THRESHOLD) return "daytime; night only";
+        if (!grass.IsDormant && envData.light > LIGHT_ACTIVITY_THRESHOLD) return "daytime; night only";
         if (grass.starchStored <= 0f) return "no starch";
         return "only below " + grass.ScaledEnergyThreshold(grass.genome.GetTraitValue(TraitId.RespirationTrigger)).ToString("F0") + " energy";
     }

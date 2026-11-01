@@ -28,6 +28,15 @@ public class GrassSpawnInput : MonoBehaviour
             }
         }
 
+        // R: switch between rotating and manual seasons
+        if (Input.GetKeyDown(KeyCode.R) && !IsTypingInInputField())
+        {
+            if (grassManager != null && grassManager.seasonManager != null)
+            {
+                grassManager.seasonManager.ToggleSeasonRotation();
+            }
+        }
+
         if (Input.GetKeyDown(KeyCode.G))
         {
             if (mapManager == null || grassManager == null || !mapManager.allowTileModification)
