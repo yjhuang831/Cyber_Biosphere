@@ -16,6 +16,6 @@ MonoBehaviour:
   traitName: DormancyRate
   minValue: 0.002
   maxValue: 0.01
-  baseValue: 0.02
+  baseValue: 0.01
   minLoci: 0
   maxLoci: 2

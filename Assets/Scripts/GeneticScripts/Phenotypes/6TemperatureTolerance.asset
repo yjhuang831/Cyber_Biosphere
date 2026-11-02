@@ -14,8 +14,8 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   id: 6
   traitName: TemperatureTolerance
-  minValue: -80
-  maxValue: 60
+  minValue: -30
+  maxValue: 45
   baseValue: -1
-  minLoci: 1
-  maxLoci: 5
+  minLoci: 2
+  maxLoci: 4

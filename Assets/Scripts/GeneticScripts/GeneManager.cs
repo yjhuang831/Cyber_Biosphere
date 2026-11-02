@@ -234,7 +234,7 @@ public class GeneManager : MonoBehaviour
         if (candidates.Count == 0)
             return false;
 
-        InsertLocus(strand, RandomAllele(candidates[Random.Range(0, candidates.Count)]));
+        InsertLocus(strand, NewLocusAllele(strand, candidates[Random.Range(0, candidates.Count)]));
         return true;
     }
 
@@ -269,12 +269,37 @@ public class GeneManager : MonoBehaviour
         if (candidates.Count == 0)
             return false;
 
-        // The locus moves to its new trait's group, with a fresh value
+        // The locus moves to its new trait's group, taking on that trait's value
         strand.RemoveAt(replaceIndex);
-        allele.traitId = candidates[Random.Range(0, candidates.Count)];
-        allele.value = (byte)Random.Range(0, MAX_ALLELE_VALUE + 1);
-        InsertLocus(strand, allele);
+        InsertLocus(strand, NewLocusAllele(strand, candidates[Random.Range(0, candidates.Count)]));
         return true;
+    }
+
+    /// <summary>
+    /// A new gene starts as a duplicate, so gaining it leaves the trait about where it was and later mutations refine
+    /// it: a copy of one of the strand's genes for the trait, or else the allele nearest the trait's base value.
+    /// Traits with no working base (no gene means the ability is off) have nothing to match, so theirs is random.
+    /// </summary>
+    private Allele NewLocusAllele(List<Allele> strand, int traitId)
+    {
+        int copies = 0;
+        Allele copied = default;
+        for (int i = 0; i < strand.Count; i++)
+        {
+            if (strand[i].traitId == traitId && Random.Range(0, ++copies) == 0)
+            {
+                copied = strand[i];
+            }
+        }
+        if (copies > 0)
+            return copied;
+
+        TraitDefinition def = traitLookup[traitId];
+        if (def.baseValue <= 0f)
+            return RandomAllele(traitId);
+
+        byte baseAllele = (byte)Mathf.RoundToInt(Mathf.InverseLerp(def.minValue, def.maxValue, def.baseValue) * MAX_ALLELE_VALUE);
+        return new Allele(baseAllele, randomBool(), traitId);
     }
 
     private bool CanLoseLocus(int traitId, int[] lociCounts)

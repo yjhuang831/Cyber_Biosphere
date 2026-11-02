@@ -10,6 +10,8 @@ public class SeasonManager : MonoBehaviour
     public int monthsPerTransition = 1;
     [Tooltip("On: seasons follow the yearly calendar, and season buttons jump the calendar. Off: seasons only change by hand.")]
     public bool rotateSeasons = true;
+    [Tooltip("Months each season holds steady at its peak before conditions start moving to the next season.")]
+    [Min(0)] public int stableMonthsPerSeason = 1;
     internal static int daysPerYear = 360;
     private int currentSeason = 0; // 0: Spring, 1: Summer, 2: Fall, 3: Winter
 
@@ -63,8 +65,8 @@ public class SeasonManager : MonoBehaviour
     private int DaysPerSeason => Mathf.Max(1, daysPerYear / seasons.Count);
 
     /// <summary>
-    /// Sets temperature and daylight from the calendar: each season peaks on its first day, with day 0 of the year
-    /// at Spring's, and conditions ease from one peak to the next. Worked out from the day, so nothing drifts or needs saving.
+    /// Sets temperature and daylight from the calendar: each season holds at its peak from its first day, with day 0 of
+    /// the year at Spring's, then conditions ease to the next peak. Worked out from the day, so nothing drifts or needs saving.
     /// </summary>
     private void ApplyCalendar()
     {
@@ -73,7 +75,9 @@ public class SeasonManager : MonoBehaviour
         int calendarDay = (int)((lastCalendarDay + calendarOffsetDays) % daysPerYear);
         int fromSeason = Mathf.Min(calendarDay / DaysPerSeason, seasons.Count - 1);
         int toSeason = (fromSeason + 1) % seasons.Count;
-        float t = (calendarDay - fromSeason * DaysPerSeason) / (float)DaysPerSeason;
+        int stableDays = Mathf.Min(stableMonthsPerSeason * DAYS_PER_MONTH, DaysPerSeason - 1);
+        int dayOfSeason = calendarDay - fromSeason * DaysPerSeason;
+        float t = Mathf.Max(0, dayOfSeason - stableDays) / (float)(DaysPerSeason - stableDays);
         float eased = 0.5f - 0.5f * Mathf.Cos(Mathf.PI * t);
         ApplySeasonBlend(seasons[fromSeason].targetTemperature, seasons[toSeason].targetTemperature,
             seasons[fromSeason].targetNoonLength, seasons[toSeason].targetNoonLength, eased);

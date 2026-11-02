@@ -8825,7 +8825,11 @@ MonoBehaviour:
   quickStartGrassFraction: 0.02
   carbonPerEnergy: 0.01
   respirationCarbonPerEnergy: 0.02
-  carbonPerSize: 10
+  storageCarbonUpkeep: 0.00001
+  shortestGrowthCarbon: 0.7
+  tallestGrowthCarbon: 2
+  heightShadeStrength: 0.8
+  shadeUpdatesPerDay: 6
 --- !u!114 &876398465
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -9950,6 +9954,8 @@ MonoBehaviour:
   smoothCenterSpeed: 15
   minBounds: {x: -50, y: -50}
   maxBounds: {x: 50, y: 50}
+  minZoom: 5
+  maxZoom: 20
   target: {fileID: 0}
 --- !u!114 &1017280372
 MonoBehaviour:
@@ -10159,7 +10165,11 @@ MonoBehaviour:
   maxTemperature: 60
   equatorialBoost: 8
   polarPenalty: -8
+  equatorSeasonStrength: 0.4
+  poleSeasonStrength: 1.3
   baseLandHydration: 20
+  coastalHydrationBonus: 60
+  coastalHydrationFadeTiles: 5
   waterLightLevel: 0
   landLightLevel: 0
   waterMaxLightLevel: 0.8
@@ -10170,24 +10180,23 @@ MonoBehaviour:
   landOxygen: 50
   dayNightCycleSpeed: 1
   baseLightLevel: 0
-  landSoilOrganicCarbon: 60
-  waterSoilOrganicCarbon: 12
   landNitrogen: 35
   waterNitrogen: 12
   landPhosphorus: 24
   waterPhosphorus: 10
   landPotassium: 40
   waterPotassium: 16
+  nutrientVariation: 0.6
+  nutrientPatchSize: 12
   atmosphericCarbon: 0
+  startingAtmosphericCarbonPerTile: 24
   referenceAtmosphericCarbonPerTile: 20
   co2HalfSaturationFraction: 0.5
   litterDecayRate: 0.0005
-  carbonDecompositionRate: 0.00003
-  aquaticCarbonUptakeRate: 0.00001
-  carbonSedimentationRate: 0.000001
-  nitrogenDepositionRate: 0.00001
-  phosphorusWeatheringRate: 0.000002
-  potassiumWeatheringRate: 0.000005
+  nitrogenRefillRate: 0.00003
+  phosphorusRefillRate: 0.00001
+  potassiumRefillRate: 0.00002
+  nutrientSettlingRate: 0.00001
   nutrientLeachingRate: 0.000005
   mapManager: {fileID: 1471658979}
   grassManager: {fileID: 876398464}
@@ -10250,6 +10259,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   monthsPerTransition: 1
+  rotateSeasons: 1
   seasonButtons:
   - {fileID: 1983873473}
   - {fileID: 1596996909}
@@ -13431,6 +13441,8 @@ MonoBehaviour:
   - {fileID: 11400000, guid: c22f119e21bdf0f44b0b0cd2ff3029de, type: 2}
   width: 45
   height: 45
+  randomTerrainLandShare: 0.4
+  randomTerrainFeatureSize: 14
   environmentManager: {fileID: 1064579890}
   environmentVisualizer: {fileID: 1064579891}
   grassManager: {fileID: 876398464}
@@ -17979,7 +17991,7 @@ RectTransform:
   m_AnchorMin: {x: 0.5, y: 0.5}
   m_AnchorMax: {x: 0.5, y: 0.5}
   m_AnchoredPosition: {x: 30, y: -120}
-  m_SizeDelta: {x: 230, y: 30}
+  m_SizeDelta: {x: 180, y: 30}
   m_Pivot: {x: 0.5, y: 0.5}
 --- !u!114 &2017755730
 MonoBehaviour:

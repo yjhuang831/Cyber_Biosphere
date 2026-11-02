@@ -18,4 +18,4 @@ MonoBehaviour:
   maxValue: 0.9
   baseValue: -1
   minLoci: 1
-  maxLoci: 3
+  maxLoci: 1
