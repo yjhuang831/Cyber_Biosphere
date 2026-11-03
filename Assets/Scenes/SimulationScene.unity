@@ -8819,15 +8819,26 @@ MonoBehaviour:
   plantAging: 1
   agingRate: 0.04
   baseGrowthCost: 0.5
-  flowerLimit: 1
   maxCloneAttemptsPerDay: 0
   maxBreedingDistance: 0.35
   quickStartGrassFraction: 0.02
-  carbonPerEnergy: 0.01
-  respirationCarbonPerEnergy: 0.02
-  storageCarbonUpkeep: 0.00001
-  shortestGrowthCarbon: 0.7
-  tallestGrowthCarbon: 2
+  nutrientUptakeRate: 0.004
+  nutrientHalfSaturation: 5
+  uptakeEnergyCost: 5
+  leafNitrogenTarget: 6
+  nitrogenTurnoverPerDay: 0.08
+  nitrogenTurnoverReturnShare: 0.5
+  nitrogenStarvedOutput: 0.3
+  nitrogenOutputGain: 1.05
+  nitrogenOutputHalfRatio: 0.5
+  cloneMinNitrogenRatio: 0.4
+  cloneNitrogenShare: 0.1
+  phosphorusFloweringsHeld: 2
+  floweringCooldownDays: 2
+  flowerPhosphorusCost: 1
+  nutrientReturnShare: 0.6
+  shortestGrowthEnergy: 0.8
+  tallestGrowthEnergy: 1.5
   heightShadeStrength: 0.8
   shadeUpdatesPerDay: 6
 --- !u!114 &876398465
@@ -8910,6 +8921,8 @@ MonoBehaviour:
   maxSeedsPerTile: 0
   mapManager: {fileID: 1471658979}
   grassManager: {fileID: 876398464}
+  minimumSproutEnergy: 15
+  minimumSproutFit: 0.4
   coldPreservationStartTemperature: 5
   coldPreservationFullRange: 20
 --- !u!114 &876398469
@@ -10161,8 +10174,8 @@ MonoBehaviour:
   baseTemperature: 20
   hydroOffset: -5
   lightOffset: -5
-  minTemperature: -80
-  maxTemperature: 60
+  minTemperature: -30
+  maxTemperature: 45
   equatorialBoost: 8
   polarPenalty: -8
   equatorSeasonStrength: 0.4
@@ -10188,12 +10201,7 @@ MonoBehaviour:
   waterPotassium: 16
   nutrientVariation: 0.6
   nutrientPatchSize: 12
-  atmosphericCarbon: 0
-  startingAtmosphericCarbonPerTile: 24
-  referenceAtmosphericCarbonPerTile: 12
-  co2HalfSaturationFraction: 0.5
-  litterDecayRate: 0.0005
-  nitrogenRefillRate: 0.00003
+  nitrogenRefillRate: 0.00002
   phosphorusRefillRate: 0.00001
   potassiumRefillRate: 0.00002
   nutrientSettlingRate: 0.00001
@@ -10236,10 +10244,6 @@ MonoBehaviour:
   oxygenGradient:
   - {r: 0.8872695, g: 0, b: 1, a: 1}
   - {r: 0, g: 1, b: 0.99489236, a: 1}
-  carbonGradient:
-  - {r: 0.95, g: 0.93, b: 0.8, a: 1}
-  - {r: 0.3, g: 0.18, b: 0.05, a: 1}
-  carbonOverlayMax: 50
   temperatureSliderGroup: {fileID: 297884302}
   hydrationSliderGroup: {fileID: 137817487}
   radiationSliderGroup: {fileID: 989015961}
@@ -10260,6 +10264,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   monthsPerTransition: 1
   rotateSeasons: 1
+  stableMonthsPerSeason: 1
   seasonButtons:
   - {fileID: 1983873473}
   - {fileID: 1596996909}
@@ -10623,8 +10628,8 @@ MonoBehaviour:
   m_FillRect: {fileID: 505493056}
   m_HandleRect: {fileID: 435291455}
   m_Direction: 2
-  m_MinValue: -80
-  m_MaxValue: 60
+  m_MinValue: -30
+  m_MaxValue: 45
   m_WholeNumbers: 1
   m_Value: 20
   m_OnValueChanged:

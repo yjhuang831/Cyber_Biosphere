@@ -297,7 +297,7 @@ public class GrassManager : MonoBehaviour
         if (grass == null || environmentManager == null)
             return;
         tile.availableNitrogen += grass.leafNitrogen * nutrientReturnShare;
-        tile.availablePhosphorus += grass.phosphorusReserve * nutrientReturnShare;
+        tile.availablePhosphorus += (grass.phosphorusReserve + grass.seedPhosphorus) * nutrientReturnShare;
     }
 
     internal void SpawnNewGrass(EnvironmentData targetData, Vector3Int gridposition, PlantGenome genome = null, float iniEnergy = 0f, string parentGenus = null, BirthCause cause = BirthCause.Player)
@@ -679,7 +679,9 @@ public class GrassManager : MonoBehaviour
 
     private void Flower(GrassInstance grass)
     {
+        // The phosphorus goes into the coming seeds, not away; it stays with the plant if no seeds come of this flowering
         grass.phosphorusReserve -= flowerPhosphorusCost;
+        grass.seedPhosphorus += flowerPhosphorusCost;
         grass.reproductiveState = ReproductiveState.Flowering;
         ResearchCounters.Today.floweringStarts++;
     }
@@ -809,7 +811,7 @@ public class GrassManager : MonoBehaviour
     /// <summary>
     /// Disperse seeds from a seeding grass. Releases SeedCount seeds that split the stored seeding energy evenly;
     /// each lands on a random tile within the Manhattan dispersal range (several may share a tile).
-    /// Seeds landing off-map or on a full tile are lost along with their energy.
+    /// Seeds landing off-map or on a full tile are lost along with their energy; their phosphorus drops under the parent.
     /// </summary>
     private void DisperseSeed(GrassInstance parent, Vector3Int parentPos)
     {
@@ -820,6 +822,8 @@ public class GrassManager : MonoBehaviour
         int range = Mathf.Max(1, (int)parent.genome.GetTraitValue(TraitId.SeedDispersalRange)); // reuse trait 21 for seed dispersal radius
         int seedCount = Mathf.Max(1, Mathf.RoundToInt(parent.genome.GetTraitValue(TraitId.SeedCount)));
         float energyPerSeed = parent.seedingEnergy / seedCount;
+        float phosphorusPerSeed = parent.seedPhosphorus / seedCount;
+        EnvironmentData parentTile = mapManager.GetTileEnvironmentData(parentPos);
         // Seed provisioning traits come from the mother, like germination energy and sprout stage
         float germinationEnergy = parent.genome.GetTraitValue(TraitId.GerminationEnergy);
         byte sproutStage = (byte)parent.genome.GetTraitValue(TraitId.SproutStage);
@@ -834,6 +838,7 @@ public class GrassManager : MonoBehaviour
             if (!mapManager.IsValidTilePosition(tile))
             {
                 ResearchCounters.Today.seedsLost++;
+                parentTile.availablePhosphorus += phosphorusPerSeed;
                 continue;
             }
 
@@ -842,6 +847,7 @@ public class GrassManager : MonoBehaviour
                 carriedGenome = parent.seedGenome,
                 parentGenus = parent.genome.genus,
                 storedEnergy = energyPerSeed,
+                phosphorus = phosphorusPerSeed,
                 germinationEnergy = germinationEnergy,
                 germinationStage = 0,
                 sproutStage = sproutStage,
@@ -851,9 +857,11 @@ public class GrassManager : MonoBehaviour
             if (!added)
             {
                 ResearchCounters.Today.seedsLost++; // Tile already at the seed cap
+                parentTile.availablePhosphorus += phosphorusPerSeed;
             }
         }
         parent.seedingEnergy = 0f;
+        parent.seedPhosphorus = 0f;
         parent.seedGenome = null;
     }
 

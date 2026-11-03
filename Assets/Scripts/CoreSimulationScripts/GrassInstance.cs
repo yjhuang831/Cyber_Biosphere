@@ -140,6 +140,8 @@ public class GrassInstance
     // Reproduction settings
     public float maturityThreshold; // Grass can reproduce when density reaches this threshold
     internal float seedingEnergy;
+    internal float seedPhosphorus = 0f;    // Phosphorus spent on flowering, held for the seeds; split among them at dispersal
+    internal bool established = false;     // Has grown past ESTABLISH_SIZE at least once; set on load from size
     internal float flowerCooldownLeft = 0f; // Sim seconds until the plant may flower again; runs down once flowering and seeding are over
     internal PlantGenome seedGenome;
 
@@ -505,6 +507,10 @@ public class GrassInstance
             // Update grass density based on energy cost
             grassDensity += densityGrowthCost * growthRate * 0.01f;
             grassDensity = Mathf.Clamp01(grassDensity);
+            if (grassDensity >= ESTABLISH_SIZE)
+            {
+                established = true;
+            }
 
             maxDormantTime = Mathf.RoundToInt(Mathf.Clamp(grassDensity * SeasonManager.daysPerYear, 0.5f * SeasonManager.daysPerYear, SeasonManager.daysPerYear));
         }
@@ -636,14 +642,15 @@ public class GrassInstance
     }
 
     private const int ESTABLISH_DAYS = 3;
-    private const float ESTABLISH_SIZE = 0.02f;
+    internal const float ESTABLISH_SIZE = 0.02f;
     private const float ESTABLISH_STARVING_ENERGY = 6f; // Just above the wilting floor (5), where a plant earning nothing sits
 
     /// <summary>
     /// A plant still tiny after a few days and starving won't recover; it dies rather than holding its tile.
     /// Being below the growth floor isn't enough: a seedling growing as fast as it can always spends down to it.
+    /// Only plants that never grew count: an established plant wilting away dies of starvation as usual.
     /// </summary>
-    private bool FailedToEstablish => age >= ESTABLISH_DAYS && grassDensity < ESTABLISH_SIZE && energyStored <= ESTABLISH_STARVING_ENERGY && !IsDormant;
+    private bool FailedToEstablish => !established && age >= ESTABLISH_DAYS && grassDensity < ESTABLISH_SIZE && energyStored <= ESTABLISH_STARVING_ENERGY && !IsDormant;
 
     /// <summary>
     /// Checks if the grass is still alive (has energy above minimum threshold).

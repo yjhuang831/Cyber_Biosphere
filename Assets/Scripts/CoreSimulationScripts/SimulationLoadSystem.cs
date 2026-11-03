@@ -520,6 +520,7 @@ public static class SimulationLoadSystem
         GrassInstance grass = new GrassInstance(tilePos, genome, source.energyStored);
         grass.energyStored = source.energyStored;
         grass.grassDensity = source.grassDensity;
+        grass.established = source.grassDensity >= GrassInstance.ESTABLISH_SIZE;
         grass.age = source.age;
         grass.ageEffect = source.ageEffect;
         grass.dormancyState = (DormancyState)source.dormancyState;
@@ -530,6 +531,7 @@ public static class SimulationLoadSystem
         grass.reproductiveState = (ReproductiveState)source.reproductiveState;
         grass.maturityThreshold = source.maturityThreshold;
         grass.seedingEnergy = source.seedingEnergy;
+        grass.seedPhosphorus = Mathf.Max(0f, source.seedPhosphorus);
         grass.flowerCooldownLeft = Mathf.Max(0f, source.flowerCooldownLeft);
         grass.nightEffect = source.nightEffect > 0f ? source.nightEffect : 1f;
         grass.leafNitrogen = Mathf.Max(0f, source.leafNitrogen);
@@ -559,6 +561,7 @@ public static class SimulationLoadSystem
             carriedGenome = genome,
             parentGenus = source.parentGenus,
             storedEnergy = source.storedEnergy,
+            phosphorus = Mathf.Max(0f, source.phosphorus),
             germinationEnergy = source.germinationEnergy,
             germinationStage = source.germinationStage,
             sproutStage = source.sproutStage,

@@ -10,8 +10,8 @@ public class EnvironmentManager : MonoBehaviour
     public float lightOffset = -5f;      // Temperature change at 0% light/complete darkness (e.g., -5 degrees at night)
     internal float seasonalTemperatureOffset;
 
-    public float minTemperature = -80f;
-    public float maxTemperature = 60f;
+    public float minTemperature = -30f;  // Clamp on tile temperature, and the ends of the temperature overlay
+    public float maxTemperature = 45f;
     public float equatorialBoost = 8f;   // Temperature change at the equator, across the middle of the map
     public float polarPenalty = -8f;     // Temperature change at the north and south edges
     [Tooltip("Share of the seasonal temperature change felt at the equator.")]
@@ -52,7 +52,7 @@ public class EnvironmentManager : MonoBehaviour
     [Min(1f)] public float nutrientPatchSize = 12f;
     [Header("Nutrient Refill and Erosion")]
     [Tooltip("Share of a tile's nitrogen shortfall (below its initial level) refilled per simulated second.")]
-    [Min(0f)] public float nitrogenRefillRate = 0.00003f;
+    [Min(0f)] public float nitrogenRefillRate = 0.00002f;
     [Tooltip("Share of a tile's phosphorus shortfall (below its initial level) refilled per simulated second.")]
     [Min(0f)] public float phosphorusRefillRate = 0.00001f;
     [Tooltip("Share of a tile's potassium shortfall (below its initial level) refilled per simulated second.")]

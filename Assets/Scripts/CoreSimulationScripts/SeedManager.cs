@@ -37,8 +37,8 @@ public class SeedManager : MonoBehaviour
     private const float SEEDLING_ENERGY_TO_GROW = 22f;        // A new plant's growth floor; more than this gives a seed no further edge
 
     [Header("Sprouting")]
-    [Tooltip("Energy a germinated seed needs before it may sprout. At the default, the seedling can start growing at once; weaker seeds keep waiting and decay.")]
-    [Min(0f)] public float minimumSproutEnergy = SEEDLING_ENERGY_TO_GROW;
+    [Tooltip("Energy a germinated seed needs before it may sprout; weaker seeds keep waiting and decay. At 22 or more a seedling can start growing at once.")]
+    [Min(0f)] public float minimumSproutEnergy = 15f;
     [Tooltip("How well a tile must suit a seed (0-1, the weaker of temperature and water fit) before it may sprout there.")]
     [Range(0f, 1f)] public float minimumSproutFit = 0.4f;
 
@@ -84,6 +84,7 @@ public class SeedManager : MonoBehaviour
                     if (seed.storedEnergy <= 0f)
                     {
                         seedsToRemove.Add(i);
+                        ReturnSeedPhosphorus(data, seed);
                         ResearchCounters.Today.seedsExhausted++;
                     }
                 }
@@ -146,6 +147,7 @@ public class SeedManager : MonoBehaviour
             if (Random.value > seed.germinationEnergy * (float)seed.sproutStage * 0.05f)
             {
                 ResearchCounters.Today.seedsFailedToSprout++;
+                ReturnSeedPhosphorus(data, seed);
                 continue;
             }
 
@@ -154,6 +156,7 @@ public class SeedManager : MonoBehaviour
                 grassManager.RemoveGrassInstance(tilePos, data, DeathCause.DisplacedBySeedling);
             }
             grassManager.SpawnNewGrass(data, tilePos, seed.carriedGenome, seed.storedEnergy, seed.parentGenus, BirthCause.Seedling);
+            data.grass.phosphorusReserve = seed.phosphorus;
             ResearchCounters.Today.seedsSprouted++;
             return;
         }
@@ -183,6 +186,7 @@ public class SeedManager : MonoBehaviour
                     if (seed.storedEnergy <= 0f)
                     {
                         seedsToRemove.Add(i);
+                        ReturnSeedPhosphorus(mapManager.GetTileEnvironmentData(tilePos), seed);
                         ResearchCounters.Today.seedsDecayed++;
                         continue;
                     }
@@ -227,6 +231,7 @@ public class SeedManager : MonoBehaviour
                     float requiredEnergy = seed.germinationEnergy * remainingStages;
                     if (requiredEnergy > seed.storedEnergy)
                     {
+                        ReturnSeedPhosphorus(mapManager.GetTileEnvironmentData(tilePos), seed);
                         seeds.RemoveAt(i);
                         DecrementSeedCount();
                         ResearchCounters.Today.seedsPruned++;
@@ -276,6 +281,14 @@ public class SeedManager : MonoBehaviour
             indexListPool = new ListPool<int>(LIST_POOL_SIZE, LIST_POOL_SIZE);
         }
         return indexListPool.Get();
+    }
+
+    /// <summary>
+    /// A dead seed rots where it lies, returning its phosphorus to that tile.
+    /// </summary>
+    private static void ReturnSeedPhosphorus(EnvironmentData tile, Seed seed)
+    {
+        tile.availablePhosphorus += seed.phosphorus;
     }
 
     private void DecrementSeedCount()
@@ -331,6 +344,7 @@ public class SeedManager : MonoBehaviour
 
                 while (seeds.Count > maxSeedsPerTile)
                 {
+                    ReturnSeedPhosphorus(mapManager.GetTileEnvironmentData(tilePos), seeds[seeds.Count - 1]);
                     seeds.RemoveAt(seeds.Count - 1);
                     DecrementSeedCount();
                 }

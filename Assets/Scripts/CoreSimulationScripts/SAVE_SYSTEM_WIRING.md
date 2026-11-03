@@ -99,7 +99,9 @@ Behavior:
   - Phase 2: rebuild map size/topology, restore environment settings (tile-level values are recalculated from them),
     plants, seeds, counters, time state, and the selected season.
 
-- Schema `22` (current): the carbon system is gone: no atmospheric carbon, litter, plant carbon or seed carbon. Older saves load without them.
+- Schema `23` (current): plants save `seedPhosphorus` and seeds save `phosphorus`; older saves load with none in either.
+
+- Schema `22`: the carbon system is gone: no atmospheric carbon, litter, plant carbon or seed carbon. Older saves load without them.
 
 - Schema `21`: plants save `leafNitrogen` in place of `nitrogenReserve` and `tissueNitrogen`; older saves load with none, and plants refill it from their tiles.
 
@@ -158,4 +160,4 @@ Behavior:
   - Keeps per-tile `oxygen` so local oxygen state from grass/environment history is preserved.
   - No longer stores genome `phenotypes`; phenotypes are rebuilt from DNA on load.
   - Adds map-level available N/P/K pools.
-  - Loader supports schemas `6` to `22`; older schemas are rejected.
+  - Loader supports schemas `6` to `23`; older schemas are rejected.

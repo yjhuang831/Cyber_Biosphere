@@ -332,6 +332,7 @@ public static class SimulationSaveSystem
             reproductiveState = (int)grass.reproductiveState,
             maturityThreshold = grass.maturityThreshold,
             seedingEnergy = grass.seedingEnergy,
+            seedPhosphorus = grass.seedPhosphorus,
             flowerCooldownLeft = grass.flowerCooldownLeft,
             usedPhotosynthesisLastTick = grass.usedPhotosynthesisLastTick,
             usedRespirationLastTick = grass.usedRespirationLastTick
@@ -347,6 +348,7 @@ public static class SimulationSaveSystem
             genomeIndex = genomeIndex,
             parentGenus = seed.parentGenus,
             storedEnergy = seed.storedEnergy,
+            phosphorus = seed.phosphorus,
             germinationEnergy = seed.germinationEnergy,
             germinationStage = seed.germinationStage,
             sproutStage = seed.sproutStage,
