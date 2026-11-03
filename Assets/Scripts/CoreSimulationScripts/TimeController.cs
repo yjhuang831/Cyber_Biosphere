@@ -621,10 +621,6 @@ public class TimeController : MonoBehaviour
                 FinishGerminationDay();
                 seedManager.SeedDecay();
                 grassManager.UpdateGenera();
-                if (simDaysSinceStart % (SeasonManager.daysPerYear / 12) == 0)
-                {
-                    environmentManager.RefillLeakedCarbon();
-                }
                 long completedDay = simDaysSinceStart > 0 ? simDaysSinceStart - 1 : MAX_DAY_COUNTER - 1;
                 if (researchLogger != null)
                 {

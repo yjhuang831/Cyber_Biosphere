@@ -3,7 +3,7 @@ using System.Collections.Generic;
 
 internal static class SimulationSnapshotConstants
 {
-    public const int SchemaVersion = 18;
+    public const int SchemaVersion = 22;
     public const int MinimumSupportedSchemaVersion = 6;
     public const string AutosaveFolder = "Autosaves";
     public const string ManualSaveFolder = "ManualSaves";
@@ -62,8 +62,6 @@ internal class EnvironmentSettingsState
     public float baseLightLevel;
     public float waterMaxLightLevel;
     public float landMaxLightLevel;
-    public double atmosphericCarbon;
-    public double mapCarbonTarget;      // Schema 17+
 }
 
 [Serializable]
@@ -101,7 +99,6 @@ internal class GrassSettingsState
     public bool plantAging;
     public float agingRate;
     public float baseGrowthCost;
-    public int flowerLimit;
     public int maxSeedsPerTile;
     public int maxCloneAttemptsPerDay; // 0 = unlimited (also what older saves load as)
 }
@@ -113,7 +110,6 @@ internal class TileState
     public int y;
     public bool isWater;
     public float oxygen;
-    public double litterCarbon;   // Schema 9+: decay pool
     public double availableNitrogen;
     public double availablePhosphorus;
     public double availablePotassium;
@@ -139,13 +135,12 @@ internal class GrassState
     public int maxDormantTime;
     public long floweringDays;
     public int reproductiveState;
-    public long flowersThisMonth;
-    public long lastFlowerMonth;
     public float maturityThreshold;
     public float seedingEnergy;
+    public float flowerCooldownLeft;    // Schema 20+
     public float nightEffect = 1f;
-    public double structuralCarbon;     // Schema 13+
-    public double availableCarbon;      // Budget within structuralCarbon, not additional carbon
+    public float leafNitrogen;          // Schema 21+
+    public float phosphorusReserve;     // Schema 19+
     public float starchCapacity;        // Schema 12+
     public float starchStored;
     public long lastCloneDay = -1;
@@ -166,7 +161,6 @@ internal class SeedState
     public int genomeIndex = -1;
     public string parentGenus;
     public float storedEnergy;
-    public double carbon;               // Schema 15+
     public float germinationEnergy;
     public byte germinationStage;
     public byte sproutStage;

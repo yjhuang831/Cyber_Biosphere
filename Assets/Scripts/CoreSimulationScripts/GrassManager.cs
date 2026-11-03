@@ -14,9 +14,8 @@ public class GrassManager : MonoBehaviour
     [Header("Plant Factors")]
     public float metabolismCostPerAllele = 0.01f;
     public bool plantAging = true;
-    public float agingRate = 0.05f; // Rate at which grass ages, affecting energy and density over time
+    public float agingRate = 0.03f; // Rate at which grass ages, affecting energy and density over time
     public float baseGrowthCost = 0.5f; // Energy cost per metabolic cycle for density growth
-    public int flowerLimit = 1; // Max flowering events per month to prevent over-flowering and encourage diversity
     [Tooltip("Clone attempts each plant may make per sim day. 0 = unlimited (one attempt per plant update, the original behaviour).")]
     [Min(0)] public int maxCloneAttemptsPerDay = 0;
 
@@ -29,19 +28,43 @@ public class GrassManager : MonoBehaviour
     [Tooltip("Share of map tiles SpawnRandomGrasses plants, e.g. 0.02 = 2% of tiles (18 plants on a 30x30 map).")]
     [Range(0f, 1f)] public float quickStartGrassFraction = 0.02f;
 
-    [Header("Plant Carbon")]
-    [Tooltip("Carbon fixed per unit of energy photosynthesis stores, and available carbon spent per unit of energy on growth, storage, or seeds.")]
-    [Min(0f)] public float carbonPerEnergy = 0.01f;
-    [Tooltip("Carbon released per unit of starch respired. Higher than carbonPerEnergy, so respiration returns carbon faster than photosynthesis takes it in.")]
-    [Min(0f)] public float respirationCarbonPerEnergy = 0.02f;
-    [Tooltip("Carbon released per unit of starch capacity per sim second, full or empty, paid from available carbon. A plant that can't pay loses capacity.")]
-    [Min(0f)] public float storageCarbonUpkeep = 0.00001f;
+    [Header("Plant Nutrients")]
+    [Tooltip("Most nitrogen or phosphorus a full-size plant can take up per sim second from a rich tile.")]
+    [Min(0f)] public float nutrientUptakeRate = 0.004f;
+    [Tooltip("Tile nutrient level at which uptake runs at half speed.")]
+    [Min(0.01f)] public float nutrientHalfSaturation = 5f;
+    [Tooltip("Energy spent per unit of nutrient taken up.")]
+    [Min(0f)] public float uptakeEnergyCost = 5f;
+    [Tooltip("Leaf nitrogen a full-size plant wants; smaller plants want proportionally less. Hunger, and so uptake, falls to nothing at this level.")]
+    [Min(0.01f)] public float leafNitrogenTarget = 6f;
+    [Tooltip("Share of leaf nitrogen lost to turnover each sim day. Keeps plants drawing from the tile for life.")]
+    [Range(0f, 1f)] public float nitrogenTurnoverPerDay = 0.08f;
+    [Tooltip("Share of turnover loss returned to the tile; the rest is gone.")]
+    [Range(0f, 1f)] public float nitrogenTurnoverReturnShare = 0.5f;
+    [Tooltip("Photosynthesis multiplier with no leaf nitrogen.")]
+    [Min(0f)] public float nitrogenStarvedOutput = 0.3f;
+    [Tooltip("How far photosynthesis rises above the starved level as leaf nitrogen climbs (saturating). With the defaults, a plant on target runs at x1.")]
+    [Min(0f)] public float nitrogenOutputGain = 1.05f;
+    [Tooltip("Leaf nitrogen, as a share of target, at which half of that rise is reached.")]
+    [Min(0.01f)] public float nitrogenOutputHalfRatio = 0.5f;
+    [Tooltip("Lowest leaf nitrogen, as a share of target, at which a plant can clone, on top of the energy cloning needs.")]
+    [Min(0f)] public float cloneMinNitrogenRatio = 0.4f;
+    [Tooltip("Share of its leaf nitrogen a parent gives each clone. The clone starts with it, and the parent is diluted by it.")]
+    [Range(0f, 1f)] public float cloneNitrogenShare = 0.1f;
+    [Tooltip("Flowerings' worth of phosphorus a full-size plant that can flower holds at most.")]
+    [Min(0f)] public float phosphorusFloweringsHeld = 2f;
+    [Tooltip("Sim days a plant must wait to flower again after it finishes flowering or seeding.")]
+    [Min(0f)] public float floweringCooldownDays = 2f;
+    [Tooltip("Phosphorus spent each time a plant flowers, on top of the energy flowering needs.")]
+    [Min(0f)] public float flowerPhosphorusCost = 1f;
+    [Tooltip("Share of a dead plant's nitrogen and phosphorus returned to its tile; the rest is lost.")]
+    [Range(0f, 1f)] public float nutrientReturnShare = 0.6f;
 
     [Header("Height")]
-    [Tooltip("Carbon cost of growth at height 0.1, relative to default height 0.5 (energy cost is unchanged).")]
-    [Min(0f)] public float shortestGrowthCarbon = 0.7f;
-    [Tooltip("Carbon cost of growth at height 1, relative to default height 0.5 (energy cost is unchanged).")]
-    [Min(0f)] public float tallestGrowthCarbon = 2f;
+    [Tooltip("Energy cost of growth at height 0.1, relative to default height 0.5.")]
+    [Min(0f)] public float shortestGrowthEnergy = 0.8f;
+    [Tooltip("Energy cost of growth at height 1, relative to default height 0.5.")]
+    [Min(0f)] public float tallestGrowthEnergy = 1.5f;
     [Tooltip("Share of light lost when all 8 neighbours' canopies stand one height unit above the plant. Each taller neighbour adds its share by how far it stands above.")]
     [Range(0f, 1f)] public float heightShadeStrength = 0.8f;
     [Tooltip("How many times per sim day plants re-check their neighbours for shade.")]
@@ -71,16 +94,10 @@ public class GrassManager : MonoBehaviour
 
     internal void UpdateAllGrassInstances(float simTime)
     {
-        // CO2 is sampled once per update so every plant sees the same level; the atmosphere still limits actual uptake
-        GrassInstance.PlantCarbonContext carbonContext = new GrassInstance.PlantCarbonContext
+        GrassInstance.PlantGrowthContext growthContext = new GrassInstance.PlantGrowthContext
         {
-            environment = environmentManager,
-            co2Factor = environmentManager != null ? environmentManager.GetCO2PhotosynthesisFactor() : 1f,
-            carbonPerEnergy = carbonPerEnergy,
-            respirationCarbonPerEnergy = respirationCarbonPerEnergy,
-            storageCarbonUpkeep = storageCarbonUpkeep,
-            shortestGrowthCarbon = shortestGrowthCarbon,
-            tallestGrowthCarbon = tallestGrowthCarbon
+            shortestGrowthEnergy = shortestGrowthEnergy,
+            tallestGrowthEnergy = tallestGrowthEnergy
         };
 
         shadeTimer += simTime;
@@ -124,10 +141,10 @@ public class GrassManager : MonoBehaviour
                 grassInstance.DailyDormancyDecision();
             }
 
-            grassInstance.PerformMetabolism(data, metabolismCostPerAllele, simTime, baseGrowthCost, TimeController.isNight, carbonContext);
+            grassInstance.PerformMetabolism(data, metabolismCostPerAllele, simTime, baseGrowthCost, TimeController.isNight, growthContext);
 
             // Check if grass should reproduce (handles energy deduction internally)
-            if (!grassInstance.IsDormant && grassInstance.CheckAndHandleSpread() && TryUseCloneAttempt(grassInstance))
+            if (!grassInstance.IsDormant && grassInstance.LeafNitrogenRatio(leafNitrogenTarget) >= cloneMinNitrogenRatio && grassInstance.CheckAndHandleSpread() && TryUseCloneAttempt(grassInstance))
             {
                 SpreadIndividualGrass(tilePos, data);
             }
@@ -140,15 +157,24 @@ public class GrassManager : MonoBehaviour
             {
                 SelfPollinate(grassInstance, tilePos);
             }
+            // The cooldown holds at full while the plant flowers or seeds, however that ends, then runs down
+            if (grassInstance.IsFlowering || grassInstance.IsSeeding)
+            {
+                grassInstance.flowerCooldownLeft = floweringCooldownDays * TimeController.fullDayLength;
+            }
+            else if (grassInstance.flowerCooldownLeft > 0f)
+            {
+                grassInstance.flowerCooldownLeft -= simTime;
+            }
+
             bool startedFloweringThisTick = false;
             // Check if grass should flower
-            if (!grassInstance.IsDormant && !grassInstance.IsFlowering && !grassInstance.IsSeeding && grassInstance.CheckFlowering())
+            if (!grassInstance.IsDormant && !grassInstance.IsFlowering && !grassInstance.IsSeeding && grassInstance.flowerCooldownLeft <= 0f
+                && grassInstance.phosphorusReserve >= flowerPhosphorusCost && grassInstance.CheckFlowering())
             {
-                startedFloweringThisTick = Flower(grassInstance, tilePos);
-                if (startedFloweringThisTick)
-                {
-                    SpreadPollen(grassInstance, tilePos);
-                }
+                startedFloweringThisTick = true;
+                Flower(grassInstance);
+                SpreadPollen(grassInstance, tilePos);
             }
             // Spread pollen once per day while flowering
             if (TimeController.accumulatedAge > 0 && grassInstance.IsFlowering && !startedFloweringThisTick)
@@ -165,6 +191,31 @@ public class GrassManager : MonoBehaviour
         if (TimeController.accumulatedAge > 0)
         {
             TimeController.accumulatedAge -= 1; // Decrement accumulated age after applying aging effects to grass instances
+        }
+    }
+
+    /// <summary>
+    /// Each plant's nitrogen turnover and feeding from its own tile. Runs with the tile nutrient pass, over the time since the last one.
+    /// </summary>
+    internal void UpdatePlantNutrients(float simTime)
+    {
+        GrassInstance.NutrientContext context = new GrassInstance.NutrientContext
+        {
+            maxUptake = nutrientUptakeRate * simTime,
+            tileHalfSaturation = nutrientHalfSaturation,
+            uptakeEnergyCost = uptakeEnergyCost,
+            leafNitrogenTarget = leafNitrogenTarget,
+            phosphorusTarget = flowerPhosphorusCost * phosphorusFloweringsHeld,
+            turnover = Mathf.Clamp01(nitrogenTurnoverPerDay * simTime / Mathf.Max(0.0001f, TimeController.fullDayLength)),
+            turnoverReturnShare = nitrogenTurnoverReturnShare,
+            starvedOutput = nitrogenStarvedOutput,
+            outputGain = nitrogenOutputGain,
+            outputHalfRatio = nitrogenOutputHalfRatio
+        };
+
+        foreach (KeyValuePair<Vector3Int, GrassInstance> entry in activeGrassInstances)
+        {
+            entry.Value.UpdateNutrients(mapManager.GetTileEnvironmentData(entry.Key), in context);
         }
     }
 
@@ -225,7 +276,9 @@ public class GrassManager : MonoBehaviour
 
             targetData.grass = new GrassInstance(gridposition, grass, spreadCost); // Start with energy equal to spread cost for new spreads
             originData.grass.energyStored -= spreadCost; // Deduct energy cost from parent if spreading
-            targetData.grass.ReceiveCarbon(originData.grass.TakeCarbon((double)spreadCost * carbonPerEnergy));
+            float nitrogenGift = originData.grass.leafNitrogen * cloneNitrogenShare;
+            originData.grass.leafNitrogen -= nitrogenGift;
+            targetData.grass.leafNitrogen = nitrogenGift;
 
             // Register the grass instance for updates
             activeGrassInstances[gridposition] = targetData.grass;
@@ -237,22 +290,21 @@ public class GrassManager : MonoBehaviour
     }
 
     /// <summary>
-    /// A dead plant's carbon goes into its tile's decay pool (see EnvironmentManager.litterDecayRate).
+    /// Part of a dead plant's nitrogen and phosphorus returns to its tile.
     /// </summary>
-    private void ReturnCarbonToLitter(GrassInstance grass, EnvironmentData tile)
+    private void ReturnPlantToTile(GrassInstance grass, EnvironmentData tile)
     {
         if (grass == null || environmentManager == null)
             return;
-        environmentManager.AddLitter(tile, grass.structuralCarbon);
-        grass.structuralCarbon = 0.0;
-        grass.availableCarbon = 0.0;
+        tile.availableNitrogen += grass.leafNitrogen * nutrientReturnShare;
+        tile.availablePhosphorus += grass.phosphorusReserve * nutrientReturnShare;
     }
 
     internal void SpawnNewGrass(EnvironmentData targetData, Vector3Int gridposition, PlantGenome genome = null, float iniEnergy = 0f, string parentGenus = null, BirthCause cause = BirthCause.Player)
     {
         ResearchCounters.RecordBirth(cause);
         bool hadGrass = targetData.grass != null;
-        ReturnCarbonToLitter(targetData.grass, targetData); // Should not happen (callers spawn on empty tiles), but never lose carbon
+        ReturnPlantToTile(targetData.grass, targetData); // Should not happen (callers spawn on empty tiles)
         PlantGenome newGenome = null;
         bool isSavedSpecies = false;
         
@@ -273,10 +325,6 @@ public class GrassManager : MonoBehaviour
         {
             targetData.grass.energyStored = iniEnergy;
         }
-        if (cause == BirthCause.Player)
-        {
-            GiveStartingCarbon(targetData.grass);
-        }
         // Register the grass instance for updates
         activeGrassInstances[gridposition] = targetData.grass;
         if (!hadGrass)
@@ -284,17 +332,6 @@ public class GrassManager : MonoBehaviour
             plantCount = IncrementWithWrap(plantCount);
         }
         mapManager.UpdateGrassTile(targetData, gridposition);
-    }
-
-    /// <summary>
-    /// A hand-planted plant has no parent or seed to carry carbon, so its starting carbon comes from the air.
-    /// </summary>
-    private void GiveStartingCarbon(GrassInstance grass)
-    {
-        if (environmentManager != null)
-        {
-            grass.ReceiveCarbon(environmentManager.TakeAtmosphericCarbon((double)grass.energyStored * carbonPerEnergy));
-        }
     }
 
     /// <summary>
@@ -453,7 +490,6 @@ public class GrassManager : MonoBehaviour
         EnsureGenusAssigned(genome);
         targetData.grass = new GrassInstance(tilePosition, genome);
         targetData.grass.energyStored = initialEnergy;
-        GiveStartingCarbon(targetData.grass);
         activeGrassInstances[tilePosition] = targetData.grass;
         plantCount = IncrementWithWrap(plantCount);
         ResearchCounters.RecordBirth(BirthCause.Player);
@@ -608,7 +644,7 @@ public class GrassManager : MonoBehaviour
         if (data.grass != null)
         {
             ResearchCounters.RecordDeath(cause);
-            ReturnCarbonToLitter(data.grass, data);
+            ReturnPlantToTile(data.grass, data);
             data.grass.Die(); // Handle any cleanup in the GrassInstance itself
             if (plantCount > 0)
             {
@@ -641,24 +677,11 @@ public class GrassManager : MonoBehaviour
         }
     }
 
-    private bool Flower(GrassInstance grass, Vector3Int grassPos)
+    private void Flower(GrassInstance grass)
     {
-        int daysPerMonth = Mathf.Max(1, seasonManager.DAYS_PER_MONTH);
-        long currentMonth = TimeController.simDaysSinceStart / daysPerMonth;
-        if (grass.lastFlowerMonth != currentMonth)
-        {
-            grass.lastFlowerMonth = currentMonth;
-            grass.flowersThisMonth = 0;
-        }
-        if (grass.flowersThisMonth >= flowerLimit)
-        {
-            return false;
-        }
-
+        grass.phosphorusReserve -= flowerPhosphorusCost;
         grass.reproductiveState = ReproductiveState.Flowering;
-        grass.flowersThisMonth = IncrementWithWrap(grass.flowersThisMonth);
         ResearchCounters.Today.floweringStarts++;
-        return true;
     }
 
     private void SpreadPollen(GrassInstance grass, Vector3Int grassPos)
@@ -786,7 +809,7 @@ public class GrassManager : MonoBehaviour
     /// <summary>
     /// Disperse seeds from a seeding grass. Releases SeedCount seeds that split the stored seeding energy evenly;
     /// each lands on a random tile within the Manhattan dispersal range (several may share a tile).
-    /// Seeds landing off-map or on a full tile are lost along with their energy; their carbon drops as litter under the parent.
+    /// Seeds landing off-map or on a full tile are lost along with their energy.
     /// </summary>
     private void DisperseSeed(GrassInstance parent, Vector3Int parentPos)
     {
@@ -797,8 +820,6 @@ public class GrassManager : MonoBehaviour
         int range = Mathf.Max(1, (int)parent.genome.GetTraitValue(TraitId.SeedDispersalRange)); // reuse trait 21 for seed dispersal radius
         int seedCount = Mathf.Max(1, Mathf.RoundToInt(parent.genome.GetTraitValue(TraitId.SeedCount)));
         float energyPerSeed = parent.seedingEnergy / seedCount;
-        double carbonPerSeed = parent.TakeSeedCarbon((double)parent.seedingEnergy * carbonPerEnergy) / seedCount;
-        EnvironmentData parentTile = mapManager.GetTileEnvironmentData(parentPos);
         // Seed provisioning traits come from the mother, like germination energy and sprout stage
         float germinationEnergy = parent.genome.GetTraitValue(TraitId.GerminationEnergy);
         byte sproutStage = (byte)parent.genome.GetTraitValue(TraitId.SproutStage);
@@ -813,7 +834,6 @@ public class GrassManager : MonoBehaviour
             if (!mapManager.IsValidTilePosition(tile))
             {
                 ResearchCounters.Today.seedsLost++;
-                environmentManager.AddLitter(parentTile, carbonPerSeed);
                 continue;
             }
 
@@ -822,7 +842,6 @@ public class GrassManager : MonoBehaviour
                 carriedGenome = parent.seedGenome,
                 parentGenus = parent.genome.genus,
                 storedEnergy = energyPerSeed,
-                carbon = carbonPerSeed,
                 germinationEnergy = germinationEnergy,
                 germinationStage = 0,
                 sproutStage = sproutStage,
@@ -832,7 +851,6 @@ public class GrassManager : MonoBehaviour
             if (!added)
             {
                 ResearchCounters.Today.seedsLost++; // Tile already at the seed cap
-                environmentManager.AddLitter(parentTile, carbonPerSeed);
             }
         }
         parent.seedingEnergy = 0f;
@@ -890,11 +908,6 @@ public class GrassManager : MonoBehaviour
     public void SetBaseGrowthCost(float newCost)
     {
         baseGrowthCost = Mathf.Max(0f, newCost);
-    }
-
-    public void SetFlowerLimit(int newLimit)
-    {
-        flowerLimit = Mathf.Max(1, newLimit);
     }
 
 }

@@ -39,7 +39,7 @@ public class EnvironmentManager : MonoBehaviour
     public float dayNightCycleSpeed = 1f;
     public float baseLightLevel = 0f;
 
-    [Header("Map Nutrient Pools (N/P/K not yet linked to plants)")]
+    [Header("Map Nutrient Pools (plants use N and P; K not yet)")]
     public float landNitrogen = 35f;
     public float waterNitrogen = 12f;
     public float landPhosphorus = 24f;
@@ -50,24 +50,6 @@ public class EnvironmentManager : MonoBehaviour
     [Range(0f, 1f)] public float nutrientVariation = 0.6f;
     [Tooltip("Rough size in tiles of nutrient-rich and nutrient-poor patches. N, P and K are patterned separately, so their ratios differ across the map.")]
     [Min(1f)] public float nutrientPatchSize = 12f;
-    [Tooltip("Atmospheric carbon (map total, relative map-carbon units). Feeds photosynthesis; does not affect temperature. " +
-             "Double precision: the pool takes tiny per-plant exchanges every update.")]
-    public double atmosphericCarbon = 0.0;
-    internal double mapCarbonTarget = 0.0; // The map's total carbon: set when a new map starts, restored by RefillLeakedCarbon
-
-    [Header("Atmospheric CO2 and Photosynthesis")]
-    [Tooltip("Atmospheric carbon per map tile on a new map. Above the reference level below, photosynthesis starts a little over x1.")]
-    [Min(0f)] public float startingAtmosphericCarbonPerTile = 24f;
-    [Tooltip("Atmospheric carbon per map tile at which photosynthesis runs at its normal rate (x1).")]
-    [Min(0.01f)] public float referenceAtmosphericCarbonPerTile = 50f;
-    [Tooltip("Half-saturation of the CO2 response, as a fraction of the reference level. Photosynthesis is x1 at the reference, " +
-             "falls toward 0 as CO2 runs out, and approaches x(1 + this) when CO2 is plentiful.")]
-    [Min(0.01f)] public float co2HalfSaturationFraction = 0.5f;
-
-    [Header("Litter (Decay Pool)")]
-    [Tooltip("Share of each tile's litter (carbon from dead plants) that decays into atmospheric CO2 per sim second.")]
-    [Min(0f)] public float litterDecayRate = 0.0005f;
-
     [Header("Nutrient Refill and Erosion")]
     [Tooltip("Share of a tile's nitrogen shortfall (below its initial level) refilled per simulated second.")]
     [Min(0f)] public float nitrogenRefillRate = 0.00003f;
@@ -213,7 +195,6 @@ public class EnvironmentManager : MonoBehaviour
         if (data == null)
             return;
 
-        data.litterCarbon = 0.0;
         data.availableNitrogen = GetInitialNutrient(tilePos, Nutrient.Nitrogen);
         data.availablePhosphorus = GetInitialNutrient(tilePos, Nutrient.Phosphorus);
         data.availablePotassium = GetInitialNutrient(tilePos, Nutrient.Potassium);
@@ -307,127 +288,18 @@ public class EnvironmentManager : MonoBehaviour
             : level - (level - initial) * settlingFraction;
     }
 
-    // ---- Atmospheric CO2 ----
-    // Carbon only moves between pools (atmosphere, plants, litter); it is never created or destroyed,
-    // except when a new map is seeded with its starting atmosphere (and legacy saves are topped up on load).
-
-    private int TileCount => mapManager != null ? Mathf.Max(1, mapManager.GetAllTilePositions().Count) : 1;
-
-    internal double AtmosphericCarbonPerTile => atmosphericCarbon / TileCount;
-
-    /// <summary>
-    /// Photosynthesis multiplier from atmospheric CO2 (saturating, normalised to x1 at the reference level).
-    /// </summary>
-    internal float GetCO2PhotosynthesisFactor()
-    {
-        double concentration = System.Math.Max(0.0, AtmosphericCarbonPerTile);
-        double reference = System.Math.Max(0.01, referenceAtmosphericCarbonPerTile);
-        double halfSaturation = reference * System.Math.Max(0.01, co2HalfSaturationFraction);
-        double response = concentration / (concentration + halfSaturation);
-        double referenceResponse = reference / (reference + halfSaturation);
-        return (float)(response / referenceResponse);
-    }
-
-    /// <summary>
-    /// Removes up to the requested carbon from the atmosphere (for photosynthesis) and returns how much was available.
-    /// </summary>
-    internal double TakeAtmosphericCarbon(double requested)
-    {
-        double granted = System.Math.Min(System.Math.Max(0.0, requested), System.Math.Max(0.0, atmosphericCarbon));
-        atmosphericCarbon -= granted;
-        return granted;
-    }
-
-    internal void ReleaseAtmosphericCarbon(double amount)
-    {
-        if (amount > 0.0)
-            atmosphericCarbon += amount;
-    }
-
-    /// <summary>
-    /// Starting atmosphere for a freshly generated map (not for loads): the starting level on every tile.
-    /// </summary>
-    internal void ResetAtmosphereForNewMap()
-    {
-        atmosphericCarbon = (double)startingAtmosphericCarbonPerTile * TileCount;
-        mapCarbonTarget = atmosphericCarbon;
-    }
-
-    /// <summary>
-    /// All carbon on the map: air, plants, litter and seeds.
-    /// </summary>
-    internal double MapCarbonTotal()
-    {
-        double total = atmosphericCarbon;
-        foreach (Vector3Int pos in mapManager.GetAllTilePositions())
-        {
-            total += mapManager.GetTileEnvironmentData(pos).litterCarbon;
-        }
-        foreach (GrassInstance grass in grassManager.activeGrassInstances.Values)
-        {
-            total += grass.structuralCarbon;
-        }
-        foreach (List<Seed> seeds in grassManager.seedManager.activeSeeds.Values)
-        {
-            for (int i = 0; i < seeds.Count; i++)
-            {
-                total += seeds[i].carbon;
-            }
-        }
-        return total;
-    }
-
-    /// <summary>
-    /// Monthly safety net: tops the air back up if the map holds less carbon than it should. Carbon only moves between
-    /// pools, so anything refilled is rounding or a leak; it is logged as carbonRefilled so a real leak still shows.
-    /// </summary>
-    internal void RefillLeakedCarbon()
-    {
-        double leaked = mapCarbonTarget - MapCarbonTotal();
-        if (leaked > 0.0)
-        {
-            atmosphericCarbon += leaked;
-            ResearchCounters.Today.carbonRefilled += leaked;
-        }
-    }
-
-    /// <summary>
-    /// Puts carbon from a dead plant into its tile's decay pool; it returns to the air over time.
-    /// </summary>
-    internal void AddLitter(EnvironmentData tile, double carbon)
-    {
-        if (tile != null && carbon > 0.0)
-            tile.litterCarbon += carbon;
-    }
-
-    /// <summary>
-    /// Empties a tile's decay pool straight into the air, for when its terrain changes and the pool is reset.
-    /// </summary>
-    internal void ReleaseLitterToAtmosphere(EnvironmentData tile)
-    {
-        ReleaseAtmosphericCarbon(tile.litterCarbon);
-        tile.litterCarbon = 0.0;
-    }
-
     private void UpdateNutrientPools(float simTime)
     {
         List<Vector3Int> positions = mapManager.GetAllTilePositions();
-        double carbonEmitted = 0.0;
-        double litterFraction = System.Math.Min(1.0, System.Math.Max(0.0, litterDecayRate) * simTime);
         double nitrogenRefill = System.Math.Min(1.0, System.Math.Max(0f, nitrogenRefillRate) * simTime);
         double phosphorusRefill = System.Math.Min(1.0, System.Math.Max(0f, phosphorusRefillRate) * simTime);
         double potassiumRefill = System.Math.Min(1.0, System.Math.Max(0f, potassiumRefillRate) * simTime);
         double settling = System.Math.Min(1.0, System.Math.Max(0f, nutrientSettlingRate) * simTime);
 
-        // Apply litter decay and nutrient refill per tile.
+        // Nutrient refill per tile.
         foreach (Vector3Int pos in positions)
         {
             EnvironmentData data = mapManager.GetTileEnvironmentData(pos);
-
-            // Decay pool: dead plant matter respires to CO2
-            double litterDecayed = data.litterCarbon * litterFraction;
-            data.litterCarbon -= litterDecayed;
-            carbonEmitted += litterDecayed;
 
             data.availableNitrogen = MoveTowardsInitial(data.availableNitrogen, GetInitialNutrient(pos, Nutrient.Nitrogen), nitrogenRefill, settling);
             data.availablePhosphorus = MoveTowardsInitial(data.availablePhosphorus, GetInitialNutrient(pos, Nutrient.Phosphorus), phosphorusRefill, settling);
@@ -438,7 +310,7 @@ public class EnvironmentManager : MonoBehaviour
             data.potassiumTransportDelta = 0.0;
         }
 
-        atmosphericCarbon = System.Math.Max(0.0, atmosphericCarbon + carbonEmitted);
+        grassManager.UpdatePlantNutrients(simTime);
 
         // Erosion carries a small share of land nutrients into adjacent water.
         foreach (Vector3Int pos in positions)

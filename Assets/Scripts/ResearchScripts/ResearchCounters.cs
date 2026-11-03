@@ -34,6 +34,7 @@ internal static class ResearchCounters
             case DeathCause.Withered: Today.deathsWithered++; break;
             case DeathCause.DisplacedBySeedling: Today.deathsDisplacedBySeedling++; break;
             case DeathCause.TerrainChange: Today.deathsTerrainChange++; break;
+            case DeathCause.FailedToEstablish: Today.deathsFailedToEstablish++; break;
             default: Today.deathsOther++; break;
         }
     }
@@ -53,7 +54,8 @@ internal enum DeathCause
     DormancyTimeout,     // Dormant longer than the plant can survive
     Withered,            // Size (density) shrank to nothing
     DisplacedBySeedling, // Weak or dormant plant replaced by a sprouting seed
-    TerrainChange        // Player converted the tile
+    TerrainChange,       // Player converted the tile
+    FailedToEstablish    // Still tiny after a few days, and starving
 }
 
 /// <summary>
@@ -71,6 +73,7 @@ internal class DailyEventCounts
     public int deathsWithered;
     public int deathsDisplacedBySeedling;
     public int deathsTerrainChange;
+    public int deathsFailedToEstablish;
     public int deathsOther;
 
     public int cloneAttempts;      // Clone shoots sent out (an occupied target tile wastes the attempt)
@@ -96,6 +99,4 @@ internal class DailyEventCounts
     public int generaFounded;      // New genera, from new wild plants or from groups that stopped being able to breed
     public int generaExtinct;
     public int crossesBlockedByGenus; // Pollen reached a flowering plant of another genus
-
-    public double carbonRefilled;  // Added to the air by the monthly leak check; anything sizeable means a carbon bug
 }

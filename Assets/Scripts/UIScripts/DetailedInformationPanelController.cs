@@ -247,10 +247,8 @@ public class DetailedInformationPanelController : MonoBehaviour
             "\nLight: " + FormatLux(currentData.light) +
             "\nRadiation: " + FormatRadiationRate(currentData.radiation) +
             "\nOxygen: " + FormatPercent(currentData.oxygen) +
-            "\nLitter (decaying): " + currentData.litterCarbon.ToString("F2") +
             (mapManager != null && mapManager.environmentManager != null
-                ? "\nAtmospheric carbon (map): " + mapManager.environmentManager.atmosphericCarbon.ToString("F2")
-                    + FormatNutrient("Nitrogen", currentData.availableNitrogen, Nutrient.Nitrogen)
+                ? FormatNutrient("Nitrogen", currentData.availableNitrogen, Nutrient.Nitrogen)
                     + FormatNutrient("Phosphorus", currentData.availablePhosphorus, Nutrient.Phosphorus)
                     + FormatNutrient("Potassium", currentData.availablePotassium, Nutrient.Potassium)
                 : "");
@@ -572,9 +570,9 @@ public class DetailedInformationPanelController : MonoBehaviour
         float costPerGene = grassManager != null ? grassManager.metabolismCostPerAllele : DEFAULT_METABOLISM_COST_PER_ALLELE;
         float baseGrowthCost = grassManager != null ? grassManager.baseGrowthCost : DEFAULT_BASE_GROWTH_COST;
         EnvironmentManager environmentManager = grassManager != null ? grassManager.environmentManager : null;
-        float co2Factor = environmentManager != null ? environmentManager.GetCO2PhotosynthesisFactor() : 1f;
-        GrassInstance.EnergyBudget budget = grass.EstimateEnergyBudget(envData, costPerGene, baseGrowthCost, co2Factor);
-        GrassInstance.PhotosynthesisFactors factors = grass.CalculatePhotosynthesis(envData, co2Factor);
+        float heightGrowthEnergy = grassManager != null ? grass.HeightGrowthEnergyMultiplier(grassManager.shortestGrowthEnergy, grassManager.tallestGrowthEnergy) : 1f;
+        GrassInstance.EnergyBudget budget = grass.EstimateEnergyBudget(envData, costPerGene, baseGrowthCost, heightGrowthEnergy);
+        GrassInstance.PhotosynthesisFactors factors = grass.CalculatePhotosynthesis(envData);
 
         StringBuilder text = new StringBuilder(2048);
         AppendIdentity(text, grass);
@@ -648,11 +646,11 @@ public class DetailedInformationPanelController : MonoBehaviour
         if (grassManager != null)
         {
             text.Append("  Height: ").Append(grass.Height.ToString("F2"))
-                .Append(Colored(MUTED_COLOR, " (growth uses x" + grass.HeightCarbonMultiplier(grassManager.shortestGrowthCarbon, grassManager.tallestGrowthCarbon).ToString("F2") + " carbon)")).Append('\n');
-            text.Append("  Structural carbon: ").Append(grass.structuralCarbon.ToString("F2"))
-                .Append(Colored(MUTED_COLOR, " (all carbon in the plant; respiration and storage upkeep release it)")).Append('\n');
-            text.Append("  Available carbon: ").Append(grass.availableCarbon.ToString("F2"))
-                .Append(Colored(MUTED_COLOR, " (budget for growth, storage, seeds and storage upkeep)")).Append('\n');
+                .Append(Colored(MUTED_COLOR, " (growth uses x" + grass.HeightGrowthEnergyMultiplier(grassManager.shortestGrowthEnergy, grassManager.tallestGrowthEnergy).ToString("F2") + " energy)")).Append('\n');
+            text.Append("  Leaf nitrogen: ").Append(grass.leafNitrogen.ToString("F2"))
+                .Append(Colored(MUTED_COLOR, " (" + (grass.LeafNitrogenRatio(grassManager.leafNitrogenTarget) * 100f).ToString("F0") + "% of target; photosynthesis x" + grass.nitrogenFactor.ToString("F2") + ")")).Append('\n');
+            text.Append("  Phosphorus: ").Append(grass.phosphorusReserve.ToString("F2"))
+                .Append(Colored(MUTED_COLOR, " (taken from its tile; pays for flowering)")).Append('\n');
         }
 
         List<string> warnings = CollectWarnings(grass, envData, budget, factors);
@@ -786,22 +784,13 @@ public class DetailedInformationPanelController : MonoBehaviour
             weakest = "Light";
             weakestScore = factors.lightEfficiency;
         }
-        if (environmentManager != null)
-        {
-            // Map-wide: every plant shares one atmosphere
-            string co2Note = factors.co2Multiplier < 0.999f ? " CO2 scarce" : factors.co2Multiplier > 1.001f ? " CO2 rich" : "";
-            text.Append("  CO2: ").Append(environmentManager.AtmosphericCarbonPerTile.ToString("F1")).Append(" per tile, reference ")
-                .Append(environmentManager.referenceAtmosphericCarbonPerTile.ToString("F0")).Append(" -> x").Append(factors.co2Multiplier.ToString("F2"))
-                .Append(co2Note).Append('\n');
-        }
-
         if (factors.starchMultiplier < 0.999f)
         {
             text.Append("  Starch nearly full -> x").Append(factors.starchMultiplier.ToString("F2")).Append(" slowed").Append('\n');
         }
 
         text.Append("  Weakest: ").Append(weakest).Append(' ').Append(FormatScore(weakestScore)).Append('\n');
-        text.Append("  ").Append(Colored(MUTED_COLOR, "Photosynthesis = 2 x water x temp x light x CO2 x starch x size")).Append('\n');
+        text.Append("  ").Append(Colored(MUTED_COLOR, "Photosynthesis = 2 x water x temp x light x starch x nitrogen x size")).Append('\n');
         text.Append("  ").Append(Colored(MUTED_COLOR, "Oxygen " + FormatPercent(envData.oxygen) + " (fuels night respiration) · Radiation "
             + envData.radiation.ToString("F2") + " (drives mutation)")).Append('\n');
     }
@@ -822,10 +811,10 @@ public class DetailedInformationPanelController : MonoBehaviour
         AppendFlow(text, '+', "Respiration", budget.respiration, budget.respirationOn ? null : RespirationOffReason(grass, envData), "burns starch and oxygen");
         AppendFlow(text, '-', "Gene upkeep", budget.geneUpkeep, null, genes + " genes");
         AppendFlow(text, '-', "Ageing", budget.ageing, null, null);
-        AppendFlow(text, '-', "Growth", budget.growth, grass.IsDormant ? "dormant" : grass.grassDensity >= 1f ? "full size" : !grass.HasEnergyToGrow ? "energy too low" : grass.availableCarbon <= 0f ? "no available carbon" : null, null);
+        AppendFlow(text, '-', "Growth", budget.growth, grass.IsDormant ? "dormant" : grass.grassDensity >= 1f ? "full size" : !grass.HasEnergyToGrow ? "energy too low" : null, null);
         if (grass.IsSeeding)
         {
-            AppendFlow(text, '-', "Seed provisioning", budget.seedProvisioning, grass.IsDormant ? "dormant" : grass.availableCarbon <= 0f ? "no available carbon" : null, null);
+            AppendFlow(text, '-', "Seed provisioning", budget.seedProvisioning, grass.IsDormant ? "dormant" : null, null);
         }
         if (budget.storageDevelopment > 0f)
         {
@@ -891,6 +880,8 @@ public class DetailedInformationPanelController : MonoBehaviour
             cloneStatus = Colored(WARN_COLOR, "needs full size (now " + (grass.grassDensity * 100f).ToString("F0") + "%)");
         else if (grass.energyStored < grass.ScaledEnergyThreshold(cloneEnergy))
             cloneStatus = Colored(WARN_COLOR, "needs " + grass.ScaledEnergyThreshold(cloneEnergy).ToString("F0") + " energy (has " + grass.energyStored.ToString("F0") + ")");
+        else if (grassManager != null && grass.LeafNitrogenRatio(grassManager.leafNitrogenTarget) < grassManager.cloneMinNitrogenRatio)
+            cloneStatus = Colored(WARN_COLOR, "needs " + (grassManager.cloneMinNitrogenRatio * 100f).ToString("F0") + "% leaf nitrogen (has " + (grass.LeafNitrogenRatio(grassManager.leafNitrogenTarget) * 100f).ToString("F0") + "%)");
         else if (cloneLimit > 0 && grass.lastCloneDay == TimeController.simDaysSinceStart && grass.cloneAttemptsToday >= cloneLimit)
             cloneStatus = Colored(WARN_COLOR, "daily limit reached");
         else
@@ -902,12 +893,9 @@ public class DetailedInformationPanelController : MonoBehaviour
                 + genome.GetTraitValue(TraitId.SpreadCost).ToString("F0") + " energy")).Append('\n');
         }
 
-        // Flowering (GrassInstance.CheckFlowering + GrassManager.Flower monthly limit)
+        // Flowering (GrassInstance.CheckFlowering + the phosphorus cost GrassManager.Flower pays)
         float flowerEnergy = genome.GetTraitValue(TraitId.FloweringEnergyThreshold);
         float maturity = genome.GetTraitValue(TraitId.MaturityThreshold);
-        int flowerLimit = grassManager != null ? grassManager.flowerLimit : 1;
-        int daysPerMonth = grassManager != null && grassManager.seasonManager != null ? Mathf.Max(1, grassManager.seasonManager.DAYS_PER_MONTH) : 30;
-        long flowersUsed = grass.lastFlowerMonth == TimeController.simDaysSinceStart / daysPerMonth ? grass.flowersThisMonth : 0;
         string flowerStatus;
         if (flowerEnergy < 0.0001f)
             flowerStatus = Colored(MUTED_COLOR, "no flowering gene");
@@ -917,12 +905,14 @@ public class DetailedInformationPanelController : MonoBehaviour
             flowerStatus = Colored(GOOD_COLOR, "done; seeds developing");
         else if (grass.IsDormant)
             flowerStatus = Colored(WARN_COLOR, "paused while dormant");
+        else if (grass.flowerCooldownLeft > 0f)
+            flowerStatus = Colored(WARN_COLOR, "resting (" + (grass.flowerCooldownLeft / TimeController.fullDayLength).ToString("F1") + " days left)");
         else if (grass.grassDensity < maturity)
             flowerStatus = Colored(WARN_COLOR, "needs size " + (maturity * 100f).ToString("F0") + "% (now " + (grass.grassDensity * 100f).ToString("F0") + "%)");
         else if (grass.energyStored < grass.ScaledEnergyThreshold(flowerEnergy))
             flowerStatus = Colored(WARN_COLOR, "needs " + grass.ScaledEnergyThreshold(flowerEnergy).ToString("F0") + " energy (has " + grass.energyStored.ToString("F0") + ")");
-        else if (flowersUsed >= flowerLimit)
-            flowerStatus = Colored(WARN_COLOR, "monthly limit reached (" + flowersUsed + "/" + flowerLimit + ")");
+        else if (grassManager != null && grass.phosphorusReserve < grassManager.flowerPhosphorusCost)
+            flowerStatus = Colored(WARN_COLOR, "needs " + grassManager.flowerPhosphorusCost.ToString("F2") + " phosphorus (has " + grass.phosphorusReserve.ToString("F2") + ")");
         else
             flowerStatus = Colored(GOOD_COLOR, "ready");
         text.Append("  Flowering: ").Append(flowerStatus).Append('\n');

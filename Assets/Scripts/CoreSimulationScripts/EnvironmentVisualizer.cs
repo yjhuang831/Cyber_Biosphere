@@ -11,10 +11,6 @@ public class EnvironmentVisualizer : MonoBehaviour
     public Color[] lightGradient;
     public Color[] radiationGradient;
     public Color[] oxygenGradient;
-    [Tooltip("Low -> high tile carbon (litter + plant).")]
-    public Color[] carbonGradient = { new Color(0.95f, 0.93f, 0.80f), new Color(0.30f, 0.18f, 0.05f) };
-    [Tooltip("Tile carbon shown at full gradient strength. Fixed (not per-frame max) so colours stay comparable over time.")]
-    [Min(0.01f)] public float carbonOverlayMax = 50f;
 
     public GameObject temperatureSliderGroup;
     public GameObject hydrationSliderGroup;
@@ -35,7 +31,7 @@ public class EnvironmentVisualizer : MonoBehaviour
 
         if (toggleButtons == null || toggleButtons.Length < 6)
         {
-            Debug.LogError("EnvironmentVisualizer requires six toggle buttons in Temperature, Hydration, Light, Radiation, Oxygen, Genus order (optional 7th: Carbon).", this);
+            Debug.LogError("EnvironmentVisualizer requires six toggle buttons in Temperature, Hydration, Light, Radiation, Oxygen, Genus order.", this);
             enabled = false;
             return;
         }
@@ -56,21 +52,6 @@ public class EnvironmentVisualizer : MonoBehaviour
         toggleButtons[3].onClick.AddListener(() => ToggleVisualization("Radiation"));
         toggleButtons[4].onClick.AddListener(() => ToggleVisualization("Oxygen"));
         toggleButtons[5].onClick.AddListener(() => ToggleVisualization("Genus"));
-
-        // Optional 7th button; alternatively wire any button's OnClick to ToggleCarbonVisualization()
-        if (toggleButtons.Length > 6 && toggleButtons[6] != null)
-        {
-            toggleButtons[6].onClick.AddListener(ToggleCarbonVisualization);
-        }
-    }
-
-    /// <summary>
-    /// Shows/hides the carbon overlay: each tile's litter and plant carbon.
-    /// Atmospheric carbon is a single map-wide pool, so it is shown in the tile info panel instead.
-    /// </summary>
-    public void ToggleCarbonVisualization()
-    {
-        ToggleVisualization("Carbon");
     }
 
     void ToggleVisualization(string factor)
@@ -150,11 +131,6 @@ public class EnvironmentVisualizer : MonoBehaviour
 
             case "Oxygen":
                 tileColor = BlendGradient(oxygenGradient, data.oxygen / 100f);
-                break;
-            case "Carbon":
-                double tileCarbon = data.litterCarbon
-                    + (data.grass != null ? data.grass.structuralCarbon : 0f);
-                tileColor = BlendGradient(carbonGradient, (float)(tileCarbon / carbonOverlayMax));
                 break;
             case "Genus":
                 if (data.grass != null) {

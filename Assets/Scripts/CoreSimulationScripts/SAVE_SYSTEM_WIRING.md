@@ -99,7 +99,15 @@ Behavior:
   - Phase 2: rebuild map size/topology, restore environment settings (tile-level values are recalculated from them),
     plants, seeds, counters, time state, and the selected season.
 
-- Schema `18` (current): time state saves `seasonRotating` and `seasonCalendarOffsetDays`; older saves load with season rotation off.
+- Schema `22` (current): the carbon system is gone: no atmospheric carbon, litter, plant carbon or seed carbon. Older saves load without them.
+
+- Schema `21`: plants save `leafNitrogen` in place of `nitrogenReserve` and `tissueNitrogen`; older saves load with none, and plants refill it from their tiles.
+
+- Schema `20`: plants save `flowerCooldownLeft`; older saves load with no cooldown running.
+
+- Schema `19`: plants save `nitrogenReserve`, `phosphorusReserve` and `tissueNitrogen`; the monthly flowering limit is gone. Older saves load with empty reserves.
+
+- Schema `18`: time state saves `seasonRotating` and `seasonCalendarOffsetDays`; older saves load with season rotation off.
 
 - Schema `17`: plant and seed carbon are saved in double precision, and the environment saves `mapCarbonTarget`, the total the monthly leak check restores; older saves use the total they hold.
 
@@ -149,5 +157,5 @@ Behavior:
   - No longer stores per-tile caches for `temperature`, `hydration`, `light`, `radiation`.
   - Keeps per-tile `oxygen` so local oxygen state from grass/environment history is preserved.
   - No longer stores genome `phenotypes`; phenotypes are rebuilt from DNA on load.
-  - Adds map-level available N/P/K pools plus the atmospheric carbon reservoir.
-  - Loader supports schemas `6` to `18`; older schemas are rejected.
+  - Adds map-level available N/P/K pools.
+  - Loader supports schemas `6` to `22`; older schemas are rejected.

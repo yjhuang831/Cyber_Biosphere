@@ -175,8 +175,6 @@ internal class ResearchLogger
             dayOfMonth = (int)(day % daysPerMonth) + 1,
             season = seasonManager != null ? seasonManager.CurrentSeason : -1,
             seasonalTemperatureOffset = environmentManager.seasonalTemperatureOffset,
-            atmosphericCarbon = environmentManager.atmosphericCarbon,
-            co2PhotosynthesisFactor = environmentManager.GetCO2PhotosynthesisFactor(),
             events = events,
             lineages = new List<LineageCount>()
         };
@@ -185,13 +183,12 @@ internal class ResearchLogger
         AddSeedStats(summary);
         AddGenusStats(summary);
         AddEnvironmentStats(summary);
-        summary.totalCarbon = summary.atmosphericCarbon + summary.structuralCarbon + summary.litterCarbon + summary.seedCarbon;
         return summary;
     }
 
     private void AddPlantStats(DailySummary summary)
     {
-        double energy = 0, density = 0, age = 0, generation = 0, loci = 0, capacity = 0, starchCapacity = 0, starchStored = 0, shadeLight = 0;
+        double energy = 0, density = 0, age = 0, generation = 0, loci = 0, capacity = 0, starchCapacity = 0, starchStored = 0, shadeLight = 0, nitrogen = 0, nitrogenFactor = 0, phosphorus = 0;
         Dictionary<string, LineageCount> lineages = new Dictionary<string, LineageCount>();
 
         foreach (GrassInstance grass in grassManager.activeGrassInstances.Values)
@@ -214,8 +211,9 @@ internal class ResearchLogger
                 shadeLight += grass.shadeMultiplier;
             }
             starchStored += grass.starchStored;
-            summary.structuralCarbon += grass.structuralCarbon;
-            summary.availableCarbon += grass.availableCarbon;
+            nitrogen += grass.leafNitrogen;
+            nitrogenFactor += grass.nitrogenFactor;
+            phosphorus += grass.phosphorusReserve;
             density += grass.grassDensity;
             age += grass.age;
             generation += grass.genome.generation;
@@ -243,6 +241,9 @@ internal class ResearchLogger
             summary.meanEnergy = (float)(energy / summary.plants);
             summary.meanEnergyCapacity = (float)(capacity / summary.plants);
             summary.meanStarchCapacity = (float)(starchCapacity / summary.plants);
+            summary.meanLeafNitrogen = (float)(nitrogen / summary.plants);
+            summary.meanNitrogenFactor = (float)(nitrogenFactor / summary.plants);
+            summary.meanPhosphorusReserve = (float)(phosphorus / summary.plants);
             summary.meanLightWhenShaded = summary.plantsShaded > 0 ? (float)(shadeLight / summary.plantsShaded) : 1f;
             summary.meanStarchStored = (float)(starchStored / summary.plants);
             summary.meanDensity = (float)(density / summary.plants);
@@ -299,7 +300,6 @@ internal class ResearchLogger
             {
                 summary.seeds++;
                 seedEnergy += seeds[i].storedEnergy;
-                summary.seedCarbon += seeds[i].carbon;
             }
         }
         if (summary.seeds > 0)
@@ -319,7 +319,6 @@ internal class ResearchLogger
         foreach (Vector3Int pos in mapManager.GetAllTilePositions())
         {
             EnvironmentData data = mapManager.GetTileEnvironmentData(pos);
-            summary.litterCarbon += data.litterCarbon;
             if (data.isWater)
             {
                 summary.waterTiles++;
@@ -539,17 +538,12 @@ internal class DailySummary
     public float waterMeanPhosphorus;
     public float waterMeanPotassium;
 
-    // Carbon budget (map totals). totalCarbon should only change when the map is reseeded; drift means a bug.
-    public double atmosphericCarbon;
-    public double structuralCarbon;
-    public double availableCarbon;      // Budget within structuralCarbon; not part of totalCarbon
-    public double litterCarbon;
-    public double seedCarbon;
-    public double totalCarbon;
-    public float co2PhotosynthesisFactor;
     public float meanEnergyCapacity;
     public float meanStarchCapacity;
     public float meanStarchStored;
+    public float meanLeafNitrogen;
+    public float meanNitrogenFactor;    // Mean photosynthesis multiplier from leaf nitrogen
+    public float meanPhosphorusReserve;
     public int plantsShaded;
     public float meanLightWhenShaded;   // Share of light reaching the plants that are shaded
 

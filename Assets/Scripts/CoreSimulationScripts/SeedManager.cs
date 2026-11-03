@@ -33,6 +33,15 @@ public class SeedManager : MonoBehaviour
         indexListPool = new ListPool<int>(LIST_POOL_SIZE, 32);
     }
 
+    private const float SEEDLING_DISPLACES_BELOW_SIZE = 0.6f; // A sprouting seed can replace a dormant plant smaller than this
+    private const float SEEDLING_ENERGY_TO_GROW = 22f;        // A new plant's growth floor; more than this gives a seed no further edge
+
+    [Header("Sprouting")]
+    [Tooltip("Energy a germinated seed needs before it may sprout. At the default, the seedling can start growing at once; weaker seeds keep waiting and decay.")]
+    [Min(0f)] public float minimumSproutEnergy = SEEDLING_ENERGY_TO_GROW;
+    [Tooltip("How well a tile must suit a seed (0-1, the weaker of temperature and water fit) before it may sprout there.")]
+    [Range(0f, 1f)] public float minimumSproutFit = 0.4f;
+
     [Header("Cold Preservation")]
     [Tooltip("Temperature (C) below which cold-preserving seeds start decaying more slowly.")]
     public float coldPreservationStartTemperature = 5f;
@@ -53,22 +62,18 @@ public class SeedManager : MonoBehaviour
 
             foreach (var tilePos in activePos)
             {
-                GrassInstance grass = null;
-                // Check if grass instance already exists
-                if (grassManager.activeGrassInstances.ContainsKey(tilePos))
-                {
-                    grass = grassManager.activeGrassInstances[tilePos];
-                }
-
                 EnvironmentData data = mapManager.GetTileEnvironmentData(tilePos);
                 List<Seed> seeds = activeSeeds[tilePos];
                 seedsToRemove.Clear();
                 for (int i = 0; i < seeds.Count; i++)
                 {
                     var seed = seeds[i];
+                    // Germinated seeds just wait for the tile to come free
+                    if (seed.germinationStage >= seed.sproutStage)
+                        continue;
+
                     // Seeds with a germination cue wait (without spending energy) until the habitat suits the plant they carry
-                    bool cueMet = seed.germinationCue <= 0f || GerminationSuitability(seed.carriedGenome, data) >= seed.germinationCue;
-                    if (seed.germinationStage < seed.sproutStage && cueMet)
+                    if (seed.germinationCue <= 0f || GerminationSuitability(seed.carriedGenome, data) >= seed.germinationCue)
                     {
                         // Consume energy to germinate
                         seed.storedEnergy -= seed.germinationEnergy;
@@ -79,42 +84,7 @@ public class SeedManager : MonoBehaviour
                     if (seed.storedEnergy <= 0f)
                     {
                         seedsToRemove.Add(i);
-                        ReturnSeedCarbon(tilePos, seed);
                         ResearchCounters.Today.seedsExhausted++;
-                        continue;
-                    }
-                    // Create grass instance if ready to sprout
-                    if (seed.germinationStage >= seed.sproutStage)
-                    {
-
-                        if (grass != null && !grass.IsDormant)
-                        {
-                            continue;
-                        }
-
-                        if (grass != null && grass.grassDensity < 0.6f)
-                        {
-                            grassManager.RemoveGrassInstance(tilePos, data, DeathCause.DisplacedBySeedling);
-                            grass = null;
-                        }
-                        else if (grass != null && grass.grassDensity >= 0.6f)
-                        {
-                            continue;
-                        }
-
-                        seedsToRemove.Add(i);
-                        // Germination chance related to energy consumed
-                        if (Random.value > seed.germinationEnergy * (float)seed.sproutStage * 0.05f)
-                        {
-                            ResearchCounters.Today.seedsFailedToSprout++;
-                            ReturnSeedCarbon(tilePos, seed);
-                            continue;
-                        }
-                        grassManager.SpawnNewGrass(data, tilePos, seed.carriedGenome, seed.storedEnergy, seed.parentGenus, BirthCause.Seedling);
-                        data.grass.ReceiveCarbon(seed.carbon);
-                        ResearchCounters.Today.seedsSprouted++;
-                        // Later seeds on this tile now see the seedling and wait, instead of overwriting it
-                        grass = data.grass;
                     }
                 }
                 for (int j = seedsToRemove.Count - 1; j >= 0; j--)
@@ -122,11 +92,70 @@ public class SeedManager : MonoBehaviour
                     seeds.RemoveAt(seedsToRemove[j]);
                     DecrementSeedCount();
                 }
+
+                // Only a free tile, or one held by a small dormant plant, can take a seedling
+                if (data.grass == null || (data.grass.IsDormant && data.grass.grassDensity < SEEDLING_DISPLACES_BELOW_SIZE))
+                {
+                    SproutBestSeed(tilePos, data, seeds);
+                }
+
                 if (seeds.Count == 0)
                 {
                     activeSeeds.Remove(tilePos);
                 }
             }
+        }
+    }
+
+    /// <summary>
+    /// Sprouts the germinated seed best placed to establish here: the best fit to the tile, with enough energy to start
+    /// growing. Only seeds meeting minimumSproutEnergy and minimumSproutFit may sprout; the others keep waiting.
+    /// Seeds that lose the germination roll are spent, and the next best tries; the rest keep waiting once one sprouts.
+    /// </summary>
+    private void SproutBestSeed(Vector3Int tilePos, EnvironmentData data, List<Seed> seeds)
+    {
+        while (true)
+        {
+            int best = -1;
+            float bestScore = float.MinValue;
+            for (int i = 0; i < seeds.Count; i++)
+            {
+                Seed candidate = seeds[i];
+                if (candidate.germinationStage < candidate.sproutStage)
+                    continue;
+
+                float fit = GerminationSuitability(candidate.carriedGenome, data);
+                if (fit < minimumSproutFit || candidate.storedEnergy < minimumSproutEnergy)
+                    continue;
+
+                float score = fit + Mathf.Clamp01(candidate.storedEnergy / SEEDLING_ENERGY_TO_GROW);
+                if (score > bestScore)
+                {
+                    bestScore = score;
+                    best = i;
+                }
+            }
+            if (best < 0)
+                return;
+
+            Seed seed = seeds[best];
+            seeds.RemoveAt(best);
+            DecrementSeedCount();
+
+            // Germination chance related to energy consumed
+            if (Random.value > seed.germinationEnergy * (float)seed.sproutStage * 0.05f)
+            {
+                ResearchCounters.Today.seedsFailedToSprout++;
+                continue;
+            }
+
+            if (data.grass != null)
+            {
+                grassManager.RemoveGrassInstance(tilePos, data, DeathCause.DisplacedBySeedling);
+            }
+            grassManager.SpawnNewGrass(data, tilePos, seed.carriedGenome, seed.storedEnergy, seed.parentGenus, BirthCause.Seedling);
+            ResearchCounters.Today.seedsSprouted++;
+            return;
         }
     }
 
@@ -154,7 +183,6 @@ public class SeedManager : MonoBehaviour
                     if (seed.storedEnergy <= 0f)
                     {
                         seedsToRemove.Add(i);
-                        ReturnSeedCarbon(tilePos, seed);
                         ResearchCounters.Today.seedsDecayed++;
                         continue;
                     }
@@ -199,7 +227,6 @@ public class SeedManager : MonoBehaviour
                     float requiredEnergy = seed.germinationEnergy * remainingStages;
                     if (requiredEnergy > seed.storedEnergy)
                     {
-                        ReturnSeedCarbon(tilePos, seed);
                         seeds.RemoveAt(i);
                         DecrementSeedCount();
                         ResearchCounters.Today.seedsPruned++;
@@ -216,7 +243,7 @@ public class SeedManager : MonoBehaviour
 
     /// <summary>
     /// How well a tile suits the plant a seed carries (0..1): the weaker of its temperature and hydration fit,
-    /// using the same factors as photosynthesis (temperature boost capped at 1).
+    /// using the same factors as photosynthesis, including too much water (temperature boost capped at 1).
     /// </summary>
     private static float GerminationSuitability(PlantGenome genome, EnvironmentData data)
     {
@@ -225,6 +252,10 @@ public class SeedManager : MonoBehaviour
 
         float hydrationRequirement = Mathf.Max(0.0001f, genome.GetTraitValue(TraitId.HydrationRequirement));
         float hydrationScore = Mathf.Clamp01(data.hydration / hydrationRequirement);
+        if (data.hydration > hydrationRequirement)
+        {
+            hydrationScore = Mathf.Clamp01(hydrationScore - (data.hydration - hydrationRequirement) / 80f);
+        }
         float temperatureScore = Mathf.Clamp01(GrassInstance.TemperatureMultiplier(data.temperature, genome.GetTraitValue(TraitId.TemperatureTolerance)));
         return Mathf.Min(hydrationScore, temperatureScore);
     }
@@ -245,17 +276,6 @@ public class SeedManager : MonoBehaviour
             indexListPool = new ListPool<int>(LIST_POOL_SIZE, LIST_POOL_SIZE);
         }
         return indexListPool.Get();
-    }
-
-    /// <summary>
-    /// A dead seed's carbon goes into its tile's decay pool, as a dead plant's does.
-    /// </summary>
-    private void ReturnSeedCarbon(Vector3Int tilePos, Seed seed)
-    {
-        if (mapManager.environmentManager != null)
-        {
-            mapManager.environmentManager.AddLitter(mapManager.GetTileEnvironmentData(tilePos), seed.carbon);
-        }
     }
 
     private void DecrementSeedCount()
@@ -311,7 +331,6 @@ public class SeedManager : MonoBehaviour
 
                 while (seeds.Count > maxSeedsPerTile)
                 {
-                    ReturnSeedCarbon(tilePos, seeds[seeds.Count - 1]);
                     seeds.RemoveAt(seeds.Count - 1);
                     DecrementSeedCount();
                 }

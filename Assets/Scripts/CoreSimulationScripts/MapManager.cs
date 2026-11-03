@@ -90,8 +90,6 @@ public class MapManager : MonoBehaviour
         if (!isInitialized)
         {
             InitializeMap();
-            // A fresh map (not a load, which brings its own atmosphere) starts at the reference CO2 level
-            environmentManager.ResetAtmosphereForNewMap();
         }
     }
 
@@ -361,7 +359,6 @@ public class MapManager : MonoBehaviour
         int y = tilePos.y + offsetY;
 
         environmentManager.ChangeInitialNutrientTerrain(tilePos, tileEnvironmentData[x, y].isWater, isWater);
-        environmentManager.ReleaseLitterToAtmosphere(tileEnvironmentData[x, y]);
         tileEnvironmentData[x, y].isWater = isWater;
         environmentManager.InitializeNutrientPools(tileEnvironmentData[x, y], tilePos);
 

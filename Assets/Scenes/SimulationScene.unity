@@ -8817,7 +8817,7 @@ MonoBehaviour:
   seasonManager: {fileID: 1064579893}
   metabolismCostPerAllele: 0.01
   plantAging: 1
-  agingRate: 0.05
+  agingRate: 0.04
   baseGrowthCost: 0.5
   flowerLimit: 1
   maxCloneAttemptsPerDay: 0
@@ -10190,7 +10190,7 @@ MonoBehaviour:
   nutrientPatchSize: 12
   atmosphericCarbon: 0
   startingAtmosphericCarbonPerTile: 24
-  referenceAtmosphericCarbonPerTile: 20
+  referenceAtmosphericCarbonPerTile: 12
   co2HalfSaturationFraction: 0.5
   litterDecayRate: 0.0005
   nitrogenRefillRate: 0.00003

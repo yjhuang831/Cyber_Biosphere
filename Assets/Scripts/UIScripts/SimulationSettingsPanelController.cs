@@ -40,8 +40,8 @@ public class SimulationSettingsPanelController : MonoBehaviour
 
     public Slider agingRateSlider;
     public TMP_Text agingRateValueText;
-    public float agingRateScalar = 0.05f;
-    public float agingRate = 0.05f;
+    public float agingRateScalar = 0.01f;
+    public float agingRate = 0.04f;
 
     public Slider metabolismCostPerAlleleSlider;
     public TMP_Text metabolismCostPerAlleleValueText;
@@ -52,10 +52,6 @@ public class SimulationSettingsPanelController : MonoBehaviour
     public TMP_Text baseGrowthCostValueText;
     public float baseGrowthCostScalar = 0.1f;
     public float baseGrowthCost = 0.5f;
-
-    public TMP_Dropdown flowerLimitDropdown;
-    public int[] flowerLimitOptions = { 1, 2, 3, 5, 10 };
-    public int flowerLimit = 1;
 
     [Header("References")]
     public GameObject localSettingsPanel;
@@ -204,23 +200,6 @@ public class SimulationSettingsPanelController : MonoBehaviour
         }
     }
 
-    public void SetFlowerLimitFromDropdown(int optionIndex)
-    {
-        int resolvedIndex = GetDropdownCurrentIndex(flowerLimitDropdown, optionIndex);
-        SetFlowerLimit(GetIntDropdownValue(flowerLimitDropdown, flowerLimitOptions, resolvedIndex, flowerLimit));
-    }
-
-    public void SetFlowerLimit(int newLimit)
-    {
-        flowerLimit = Mathf.Max(1, newLimit);
-
-        GrassManager grassManager = GetActiveGrassManager();
-        if (grassManager != null)
-        {
-            grassManager.SetFlowerLimit(flowerLimit);
-        }
-    }
-
     public void ApplyAllSettings()
     {
         ApplyLocalSettings();
@@ -271,7 +250,6 @@ public class SimulationSettingsPanelController : MonoBehaviour
         metabolismCostPerAlleleValueText.text = metabolismCostPerAllele.ToString("F3") + " J/s/allele";
         SetSliderToScaledIntValue(baseGrowthCostSlider, baseGrowthCostScalar, baseGrowthCost);
         baseGrowthCostValueText.text = baseGrowthCost.ToString("F2") + " J/s";
-        SetDropdownToIntValue(flowerLimitDropdown, flowerLimitOptions, flowerLimit);
 
         if (plantAgingToggle != null)
         {
@@ -333,7 +311,6 @@ public class SimulationSettingsPanelController : MonoBehaviour
         plantAging = grassManager.plantAging;
         agingRate = Mathf.Max(0f, grassManager.agingRate);
         baseGrowthCost = Mathf.Max(0f, grassManager.baseGrowthCost);
-        flowerLimit = Mathf.Max(1, grassManager.flowerLimit);
     }
 
     private void ApplyAutoSaveSettingsToActiveTimeController()
@@ -362,7 +339,6 @@ public class SimulationSettingsPanelController : MonoBehaviour
         grassManager.SetPlantAging(plantAging);
         grassManager.SetAgingRate(agingRate);
         grassManager.SetBaseGrowthCost(baseGrowthCost);
-        grassManager.SetFlowerLimit(flowerLimit);
     }
 
     private static SeedManager GetActiveSeedManager()
@@ -493,7 +469,7 @@ public class SimulationSettingsPanelController : MonoBehaviour
         if (slider == null || scalar <= 0f)
             return;
 
-        int scaledValue = (int)(unscaledValue / scalar);
+        int scaledValue = Mathf.RoundToInt(unscaledValue / scalar);
         slider.SetValueWithoutNotify(scaledValue);
     }
 

@@ -152,7 +152,6 @@ public static class SimulationSaveSystem
                 y = tilePos.y,
                 isWater = env.isWater,
                 oxygen = env.oxygen,
-                litterCarbon = env.litterCarbon,
                 availableNitrogen = env.availableNitrogen,
                 availablePhosphorus = env.availablePhosphorus,
                 availablePotassium = env.availablePotassium,
@@ -250,9 +249,7 @@ public static class SimulationSaveSystem
             dayNightCycleSpeed = environmentManager.dayNightCycleSpeed,
             baseLightLevel = environmentManager.baseLightLevel,
             waterMaxLightLevel = environmentManager.waterMaxLightLevel,
-            landMaxLightLevel = environmentManager.landMaxLightLevel,
-            atmosphericCarbon = environmentManager.atmosphericCarbon,
-            mapCarbonTarget = environmentManager.mapCarbonTarget
+            landMaxLightLevel = environmentManager.landMaxLightLevel
         };
     }
 
@@ -267,7 +264,6 @@ public static class SimulationSaveSystem
             plantAging = grassManager.plantAging,
             agingRate = grassManager.agingRate,
             baseGrowthCost = grassManager.baseGrowthCost,
-            flowerLimit = grassManager.flowerLimit,
             maxSeedsPerTile = seedManager.maxSeedsPerTile,
             maxCloneAttemptsPerDay = grassManager.maxCloneAttemptsPerDay
         };
@@ -314,8 +310,8 @@ public static class SimulationSaveSystem
             genomeIndex = genomeIndex,
             seedGenomeIndex = seedGenomeIndex,
             nightEffect = grass.nightEffect,
-            structuralCarbon = grass.structuralCarbon,
-            availableCarbon = grass.availableCarbon,
+            leafNitrogen = grass.leafNitrogen,
+            phosphorusReserve = grass.phosphorusReserve,
             starchCapacity = grass.starchCapacity,
             starchStored = grass.starchStored,
             lastCloneDay = grass.lastCloneDay,
@@ -334,10 +330,9 @@ public static class SimulationSaveSystem
             maxDormantTime = grass.maxDormantTime,
             floweringDays = grass.floweringDays,
             reproductiveState = (int)grass.reproductiveState,
-            flowersThisMonth = grass.flowersThisMonth,
-            lastFlowerMonth = grass.lastFlowerMonth,
             maturityThreshold = grass.maturityThreshold,
             seedingEnergy = grass.seedingEnergy,
+            flowerCooldownLeft = grass.flowerCooldownLeft,
             usedPhotosynthesisLastTick = grass.usedPhotosynthesisLastTick,
             usedRespirationLastTick = grass.usedRespirationLastTick
         };
@@ -352,7 +347,6 @@ public static class SimulationSaveSystem
             genomeIndex = genomeIndex,
             parentGenus = seed.parentGenus,
             storedEnergy = seed.storedEnergy,
-            carbon = seed.carbon,
             germinationEnergy = seed.germinationEnergy,
             germinationStage = seed.germinationStage,
             sproutStage = seed.sproutStage,

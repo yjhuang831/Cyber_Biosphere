@@ -353,10 +353,6 @@ public static class SimulationLoadSystem
                     env.availablePhosphorus = Math.Max(0.0, tileState.availablePhosphorus);
                     env.availablePotassium = Math.Max(0.0, tileState.availablePotassium);
                 }
-                if (snapshot.schemaVersion >= 9)
-                {
-                    env.litterCarbon = Math.Max(0.0, tileState.litterCarbon);
-                }
                 // Older saves keep the fresh random map ReinitializeForLoad made
                 if (snapshot.schemaVersion >= 16)
                 {
@@ -366,15 +362,6 @@ public static class SimulationLoadSystem
                 }
             }
             env.grass = null;
-        }
-
-        // Before schema 9 the atmosphere started empty and had no effect; now CO2 drives photosynthesis,
-        // so top old saves up to the reference level rather than starving every plant.
-        if (snapshot.schemaVersion < 9 && environmentManager.AtmosphericCarbonPerTile < environmentManager.referenceAtmosphericCarbonPerTile)
-        {
-            double before = environmentManager.atmosphericCarbon;
-            environmentManager.ResetAtmosphereForNewMap();
-            Debug.Log("Legacy save: atmospheric carbon raised from " + before.ToString("F1") + " to " + environmentManager.atmosphericCarbon.ToString("F1") + " (CO2 now affects photosynthesis).");
         }
 
         // Plants
@@ -434,11 +421,6 @@ public static class SimulationLoadSystem
         }
 
         grassManager.UpdateShade();
-        // Older saves have no target; take what they hold, so a past leak isn't refilled all at once
-        if (snapshot.schemaVersion < 17)
-        {
-            environmentManager.mapCarbonTarget = environmentManager.MapCarbonTotal();
-        }
         grassManager.plantCount = loadedPlantCount;
         seedManager.seedCount = loadedSeedCount;
 
@@ -497,8 +479,6 @@ public static class SimulationLoadSystem
         target.baseLightLevel = source.baseLightLevel;
         target.waterMaxLightLevel = source.waterMaxLightLevel;
         target.landMaxLightLevel = source.landMaxLightLevel;
-        target.atmosphericCarbon = Math.Max(0.0, source.atmosphericCarbon);
-        target.mapCarbonTarget = source.mapCarbonTarget;
     }
 
     private static void ApplyGrassSettings(GrassSettingsState source, GrassManager target, SeedManager seedTarget)
@@ -510,7 +490,6 @@ public static class SimulationLoadSystem
         target.plantAging = source.plantAging;
         target.agingRate = source.agingRate;
         target.baseGrowthCost = source.baseGrowthCost;
-        target.flowerLimit = source.flowerLimit;
         target.maxCloneAttemptsPerDay = Mathf.Max(0, source.maxCloneAttemptsPerDay);
         seedTarget.maxSeedsPerTile = source.maxSeedsPerTile;
     }
@@ -549,13 +528,12 @@ public static class SimulationLoadSystem
         grass.maxDormantTime = source.maxDormantTime;
         grass.floweringDays = source.floweringDays;
         grass.reproductiveState = (ReproductiveState)source.reproductiveState;
-        grass.flowersThisMonth = source.flowersThisMonth;
-        grass.lastFlowerMonth = source.lastFlowerMonth;
         grass.maturityThreshold = source.maturityThreshold;
         grass.seedingEnergy = source.seedingEnergy;
+        grass.flowerCooldownLeft = Mathf.Max(0f, source.flowerCooldownLeft);
         grass.nightEffect = source.nightEffect > 0f ? source.nightEffect : 1f;
-        grass.structuralCarbon = Math.Max(0.0, source.structuralCarbon);
-        grass.availableCarbon = Math.Max(0.0, source.availableCarbon);
+        grass.leafNitrogen = Mathf.Max(0f, source.leafNitrogen);
+        grass.phosphorusReserve = Mathf.Max(0f, source.phosphorusReserve);
         grass.starchCapacity = Mathf.Max(0f, source.starchCapacity); // 0 for pre-schema-12 saves; redeveloped after load
         grass.starchStored = Mathf.Clamp(source.starchStored, 0f, grass.starchCapacity);
         grass.lastCloneDay = source.lastCloneDay;
@@ -581,7 +559,6 @@ public static class SimulationLoadSystem
             carriedGenome = genome,
             parentGenus = source.parentGenus,
             storedEnergy = source.storedEnergy,
-            carbon = Math.Max(0.0, source.carbon), // 0 for pre-schema-15 saves
             germinationEnergy = source.germinationEnergy,
             germinationStage = source.germinationStage,
             sproutStage = source.sproutStage,
