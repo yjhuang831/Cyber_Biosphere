@@ -32,7 +32,9 @@ public static class TraitId
 
     public const int StarchStorage = 25;         // Maximum starch the plant can develop storage for
     public const int Height = 26;                // 0.5 without the gene: growth uses more energy with height, and taller neighbours shade shorter plants
+    public const int NutrientFocus = 27;         // -1 nitrogen .. +1 phosphorus; 0 (generalist) without the gene. Trades scavenging of scarce N against scarce P
+    public const int RootReach = 28;             // Farthest root tile from the plant (Manhattan, whole tiles: 0-3); 2 without the gene
 
     // Number of trait ids; used for fallback phenotype arrays when no TraitDatabase is available
-    public const int Count = 27;
+    public const int Count = 29;
 }

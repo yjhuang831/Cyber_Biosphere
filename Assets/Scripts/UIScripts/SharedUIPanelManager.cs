@@ -178,17 +178,6 @@ public class SharedUIPanelManager : MonoBehaviour
         return true;
     }
 
-    public void DeleteSelectedSave()
-    {
-        if (string.IsNullOrWhiteSpace(selectedSaveName))
-        {
-            Debug.LogWarning("Delete save skipped: no save file selected.");
-            return;
-        }
-
-        DeleteSave(selectedSaveName);
-    }
-
     public bool DeleteSave(string saveNameOrPath)
     {
         if (!SimulationLoadSystem.TryResolveSnapshotPathByIdentifier(saveNameOrPath, out string filePath))

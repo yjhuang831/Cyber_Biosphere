@@ -110,14 +110,6 @@ public class SavedSpeciesManager : MonoBehaviour
     }
 
     /// <summary>
-    /// Refreshes the species list and shows the panel (called after deletion).
-    /// </summary>
-    public void RefreshAndShowSpecies()
-    {
-        ShowSpecies(true);
-    }
-
-    /// <summary>
     /// Hides the species selection panel.
     /// </summary>
     public void HideSpecies()

@@ -36,6 +36,10 @@ public class EnvironmentData
     public UnityEngine.Color cachedTileColor = new UnityEngine.Color(-1, -1, -1, -1);
     [System.NonSerialized]
     public List<Vector3Int> immediateNeighbors;
+    // The tiles a plant here could root into, in RootZone's layout (null off the map), and a mask of the slots that exist.
+    // Built with the map (MapManager.BuildRootZones); terrain is read on use, so terrain edits don't invalidate them.
+    [System.NonSerialized] public EnvironmentData[] rootZone;
+    [System.NonSerialized] public uint rootZoneValid;
     
     // [OPTIMIZED] Cache static temperature offset (latitude + PerlinNoise effects)
     // This never changes per tile, so compute once and reuse every frame

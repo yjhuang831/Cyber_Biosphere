@@ -40,6 +40,14 @@ public class GrassInstance
     internal float starchStored = 0f;      // Energy held as starch: filled by surplus photosynthesis, spent by respiration
     internal float shadeMultiplier = 1f;   // Share of tile light reaching the plant past taller neighbours; set by GrassManager.UpdateShade
     internal int drawnAppearance = -1;     // Appearance MapManager last drew for this plant
+    // Roots: a connected network of tiles grown one at a time, orthogonally, from the plant's own tile or an existing root,
+    // no farther than its RootReach gene allows. Stored as a bit mask over RootZone's layout; bit 0 is the plant's own tile.
+    internal uint rootMask = RootZone.BASE_BIT;
+    internal int rootCount = 0;                // Root tiles beyond its own
+    internal float rootGrowthProgress = 0f;    // Builds toward the next root tile (1 = ready to grow one)
+    internal float rootDiebackProgress = 0f;   // Builds toward losing a root while the plant wilts
+    internal float nitrogenHunger = 0f;        // At the last uptake: 0 = on target, 1 = none held
+    internal float phosphorusHunger = 0f;
 
     // Height is genetic; what a plant casts over its neighbours also depends on how grown it is
     internal float Height => genome.GetTraitValue(TraitId.Height);
@@ -57,6 +65,216 @@ public class GrassInstance
         return height < DEFAULT_HEIGHT
             ? Mathf.Lerp(atShortest, 1f, Mathf.InverseLerp(SHORTEST_HEIGHT, DEFAULT_HEIGHT, height))
             : Mathf.Lerp(1f, atTallest, Mathf.InverseLerp(DEFAULT_HEIGHT, TALLEST_HEIGHT, height));
+    }
+
+    // ---- Roots and nutrient focus ----
+    // Modelled on real roots:
+    // - They grow toward resources: a new root goes into the neighbouring tile that best supplies what the plant lacks,
+    //   and only while the plant is short of nutrients, so poor soil grows a large root system and rich soil a small one.
+    // - They cost sugar to build and to keep alive (root respiration), and a plant builds them before it grows its shoot
+    //   further (lower energy floor than shoot growth).
+    // - Roots in exhausted soil die off, and a starving plant sheds its outermost roots first.
+    // - They work only as well as the plant suits the tile's water: wetland plants can root into the shallows, dry-land
+    //   plants can't. Phosphate barely moves in soil, so roots get less of it than of nitrogen away from the plant.
+    // - Rhizomes and runners follow the roots: clones can start only on a root tile.
+    private const float ROOT_GROWTH_MIN_ENERGY = 60f;  // 0-100 scale; shoot growth needs 85
+    private const float ROOT_BASE_DRIVE = 0.3f;        // Root growth speed with no nutrient hunger, as a share of the full rate
+    private const float ROOT_RETRY_PROGRESS = 0.75f;   // After finding no worthwhile tile, wait a quarter of a root's time
+
+    internal float NutrientHunger => Mathf.Max(nitrogenHunger, phosphorusHunger);
+    internal int RootLimit => Mathf.Clamp(Mathf.FloorToInt(genome.GetTraitValue(TraitId.RootReach) + 0.0001f), 0, RootZone.MAX_DISTANCE);
+    internal float NutrientFocus => Mathf.Clamp(genome.GetTraitValue(TraitId.NutrientFocus), -1f, 1f);
+    internal float SizeShare => EnergyCapacity / MAX_ENERGY_CAPACITY;
+
+    /// <summary>
+    /// Half-saturation multiplier for nitrogen (divide for phosphorus): below 1 when the plant leans toward nitrogen.
+    /// </summary>
+    internal float FocusScale(float focusStrength)
+    {
+        return Mathf.Pow(Mathf.Max(1f, focusStrength), NutrientFocus);
+    }
+
+    /// <summary>
+    /// Energy per sim second to keep the roots alive. Root mass scales with plant size, as uptake does.
+    /// </summary>
+    internal float RootUpkeepRate(float upkeepPerTile)
+    {
+        return upkeepPerTile * rootCount * SizeShare * dormancyEffect;
+    }
+
+    /// <summary>
+    /// How well roots work in a tile (0-1): the plant's water fit there, the same measure photosynthesis uses.
+    /// </summary>
+    internal static float RootFit(float hydration, float hydrationRequirement)
+    {
+        float requirement = Mathf.Max(0.01f, hydrationRequirement);
+        float fit = Mathf.Clamp01(hydration / requirement);
+        if (hydration > requirement)
+        {
+            fit -= (hydration - requirement) / 80f;
+        }
+        return Mathf.Clamp01(fit);
+    }
+
+    /// <summary>
+    /// What a tile is worth to the roots now (0-1): how readily it gives the nutrients the plant is short of
+    /// (A / (A + half-saturation), weighted by hunger), times the plant's root fit there.
+    /// </summary>
+    internal float RootTileQuality(EnvironmentData soil, in PlantGrowthContext context)
+    {
+        float wantN = nitrogenHunger;
+        float wantP = phosphorusHunger;
+        if (wantN + wantP <= 0f)
+        {
+            wantN = 1f;
+            wantP = 1f;
+        }
+        float focusScale = FocusScale(context.focusStrength);
+        double nitrogen = System.Math.Max(0.0, soil.availableNitrogen);
+        double phosphorus = System.Math.Max(0.0, soil.availablePhosphorus);
+        float supplyN = (float)(nitrogen / (nitrogen + context.halfSaturation * focusScale));
+        float supplyP = (float)(phosphorus / (phosphorus + context.halfSaturation / focusScale)) * context.phosphorusRootAccess;
+        float supply = (wantN * supplyN + wantP * supplyP) / (wantN + wantP);
+        return supply * RootFit(soil.hydration, genome.GetTraitValue(TraitId.HydrationRequirement));
+    }
+
+    /// <summary>
+    /// Builds toward the next root tile; when ready and the plant is short of nutrients, grows one into the best tile
+    /// next to the network (orthogonally), within reach, if that tile is worth it.
+    /// </summary>
+    private void GrowRoots(EnvironmentData home, in PlantGrowthContext context, float time)
+    {
+        if (IsDormant || home.rootZone == null)
+            return;
+
+        float hunger = NutrientHunger;
+        rootGrowthProgress = Mathf.Min(1f, rootGrowthProgress
+            + context.rootGrowthPerDay * (ROOT_BASE_DRIVE + (1f - ROOT_BASE_DRIVE) * hunger) * time / Mathf.Max(1f, context.dayLength));
+        if (rootGrowthProgress < 1f || hunger <= context.rootHungerSetPoint)
+            return;
+
+        float cost = context.rootBuildEnergyPerTile * SizeShare;
+        if (energyStored - cost < ScaledEnergyThreshold(ROOT_GROWTH_MIN_ENERGY))
+            return;
+
+        uint candidates = RootZone.Frontier(rootMask) & RootZone.WithinDistance[RootLimit] & home.rootZoneValid;
+        int best = -1;
+        float bestQuality = context.rootMinTileQuality;
+        for (int i = 1; i < RootZone.SIZE && candidates != 0; i++)
+        {
+            uint bit = 1u << i;
+            if ((candidates & bit) == 0)
+                continue;
+            candidates &= ~bit;
+            // A little noise so equal tiles don't always lose to the same direction
+            float quality = RootTileQuality(home.rootZone[i], in context) * (0.95f + 0.1f * Random.value);
+            if (quality >= bestQuality)
+            {
+                bestQuality = quality;
+                best = i;
+            }
+        }
+
+        if (best < 0)
+        {
+            rootGrowthProgress = ROOT_RETRY_PROGRESS;
+            return;
+        }
+        rootMask |= 1u << best;
+        rootCount++;
+        energyStored -= cost;
+        rootGrowthProgress = 0f;
+    }
+
+    /// <summary>
+    /// Once a day: sheds the least useful root the network can lose, if its tile is exhausted or the plant is well fed.
+    /// Dormant plants keep their roots.
+    /// </summary>
+    internal void DailyRootShedding(EnvironmentData home, in PlantGrowthContext context)
+    {
+        if (rootCount == 0 || IsDormant || home.rootZone == null)
+            return;
+
+        int worst = -1;
+        float worstQuality = float.MaxValue;
+        for (int i = 1; i < RootZone.SIZE; i++)
+        {
+            uint bit = 1u << i;
+            if ((rootMask & bit) == 0 || !RootZone.IsConnected(rootMask & ~bit))
+                continue;
+            float quality = home.rootZone[i] != null ? RootTileQuality(home.rootZone[i], in context) : 0f;
+            if (quality < worstQuality)
+            {
+                worstQuality = quality;
+                worst = i;
+            }
+        }
+        if (worst >= 0 && (worstQuality < context.rootShedQuality || NutrientHunger < context.rootShedHunger))
+        {
+            RemoveRoot(worst);
+        }
+    }
+
+    /// <summary>
+    /// A starving plant loses its outermost root that the network can spare.
+    /// </summary>
+    private void ShedOutermostRoot()
+    {
+        int outermost = -1;
+        for (int i = RootZone.SIZE - 1; i >= 1; i--)
+        {
+            uint bit = 1u << i;
+            if ((rootMask & bit) != 0 && RootZone.IsConnected(rootMask & ~bit))
+            {
+                outermost = i; // Slots are ordered by distance, so the first found from the end is outermost
+                break;
+            }
+        }
+        if (outermost >= 0)
+        {
+            RemoveRoot(outermost);
+        }
+    }
+
+    private void RemoveRoot(int slot)
+    {
+        rootMask &= ~(1u << slot);
+        rootCount--;
+    }
+
+    /// <summary>
+    /// A random root tile (layout slot) for a clone, or -1 with no roots beyond the plant's own tile.
+    /// </summary>
+    internal int RandomRootSlot()
+    {
+        if (rootCount <= 0)
+            return -1;
+        int pick = Random.Range(0, rootCount);
+        for (int i = 1; i < RootZone.SIZE; i++)
+        {
+            if ((rootMask & (1u << i)) != 0 && pick-- == 0)
+                return i;
+        }
+        return -1;
+    }
+
+    /// <summary>
+    /// After a load: keeps only roots that fit the map and the gene's reach and still join the plant. Plants from saves
+    /// without roots get the orthogonal neighbours if established, so loading an old save doesn't stop cloning.
+    /// </summary>
+    internal void ValidateRoots(EnvironmentData home, bool giveStarterRoots)
+    {
+        uint allowed = home.rootZone != null ? RootZone.WithinDistance[RootLimit] & home.rootZoneValid : RootZone.BASE_BIT;
+        if (giveStarterRoots)
+        {
+            rootMask = RootZone.WithinDistance[Mathf.Min(1, RootLimit)];
+        }
+        rootMask = (rootMask & allowed) | RootZone.BASE_BIT;
+        if (!RootZone.IsConnected(rootMask))
+        {
+            rootMask = RootZone.BASE_BIT;
+        }
+        rootCount = RootZone.CountBits(rootMask) - 1;
     }
 
     // ---- Energy storage, scaled by size ----
@@ -131,6 +349,18 @@ public class GrassInstance
     {
         public float shortestGrowthEnergy;     // Energy cost of growth at the shortest height, relative to default height
         public float tallestGrowthEnergy;      // Energy cost of growth at the tallest height, relative to default height
+        public float dayLength;                // Sim seconds per day
+        public float rootGrowthPerDay;         // Root tiles a day a starving plant can grow; a well-fed one grows 30% of this
+        public float rootBuildEnergyPerTile;   // Energy to grow one root tile, at full size
+        public float rootUpkeepPerTile;        // Energy per sim second to keep one root tile alive, at full size
+        public float rootDiebackPerDay;        // Root tiles lost per day while the plant is wilting
+        public float rootHungerSetPoint;       // Roots grow while nutrient hunger is above this
+        public float rootMinTileQuality;       // A new root only goes into a tile at least this good (0-1)
+        public float rootShedQuality;          // Roots in tiles that fall below this are shed, one a day
+        public float rootShedHunger;           // A plant this well fed sheds its least useful root, one a day
+        public float halfSaturation;           // Tile nutrient level at which uptake runs at half speed
+        public float focusStrength;            // Half-saturation factor at full nutrient focus
+        public float phosphorusRootAccess;     // Share of phosphorus roots draw away from the plant's own tile
     }
     
     // [OPTIMIZED] Cached plant type for performance (never changes per genome)
@@ -180,15 +410,6 @@ public class GrassInstance
     }
 
     /// <summary>
-    /// Checks if this grass has reached maturity and can reproduce.
-    /// Reproduction is enabled when density reaches the maturity threshold.
-    /// </summary>
-    public bool CanReproduce()
-    {
-        return grassDensity >= maturityThreshold;
-    }
-
-    /// <summary>
     /// Inputs and result of the photosynthesis formula for a tile, without side effects.
     /// </summary>
     internal struct PhotosynthesisFactors
@@ -198,7 +419,6 @@ public class GrassInstance
         public float temperatureMultiplier; // 0..1.5, see TemperatureMultiplier
         public float basePotential;         // 2 × water × temperature, before light and size; compared with DormancyTrigger
         public float starchMultiplier;      // Slowdown from full starch storage (1 = none)
-        public float nitrogenMultiplier;    // From leaf nitrogen concentration (see UpdateNutrients)
         public float rate;                  // Energy per sim second at the current light, starch, nitrogen and size
     }
 
@@ -237,7 +457,6 @@ public class GrassInstance
 
         factors.basePotential = 2f * factors.hydrationEfficiency * factors.temperatureMultiplier;
         factors.starchMultiplier = StarchPhotosynthesisMultiplier;
-        factors.nitrogenMultiplier = nitrogenFactor;
         factors.rate = factors.basePotential * factors.lightEfficiency * factors.starchMultiplier * nitrogenFactor * grassDensity;
         return factors;
     }
@@ -323,12 +542,13 @@ public class GrassInstance
         public float growth;
         public float seedProvisioning;
         public float storageDevelopment;
+        public float rootUpkeep;
         public float Gains => photosynthesis + respiration;
-        public float Costs => geneUpkeep + ageing + growth + seedProvisioning + storageDevelopment;
+        public float Costs => geneUpkeep + ageing + growth + seedProvisioning + storageDevelopment + rootUpkeep;
         public float Net => Gains - Costs;
     }
 
-    internal EnergyBudget EstimateEnergyBudget(EnvironmentData eData, float metabolismCostPerAllele, float baseGrowthCost, float heightGrowthEnergy = 1f)
+    internal EnergyBudget EstimateEnergyBudget(EnvironmentData eData, float metabolismCostPerAllele, float baseGrowthCost, float heightGrowthEnergy = 1f, float rootUpkeepPerTile = 0f)
     {
         EnergyBudget budget = new EnergyBudget();
 
@@ -373,6 +593,7 @@ public class GrassInstance
         {
             budget.storageDevelopment = Mathf.Min(growthExpense, MaxStarchCapacity - starchCapacity);
         }
+        budget.rootUpkeep = RootUpkeepRate(rootUpkeepPerTile);
 
         return budget;
     }
@@ -524,6 +745,10 @@ public class GrassInstance
             seedingEnergy += seedCost;
         }
 
+        // Roots: upkeep for every root tile, then growth toward what the plant lacks
+        energyStored -= RootUpkeepRate(growthContext.rootUpkeepPerTile) * time;
+        GrowRoots(eData, in growthContext, time);
+
         if (CanDevelopStarchStorage)
         {
             // Paid from the same budget as seeds; one unit of energy builds room for one unit of starch
@@ -534,6 +759,13 @@ public class GrassInstance
 
         if (energyStored < 5f && age > 1)
         {
+            // A plant out of sugar sheds its outermost roots first
+            rootDiebackProgress += growthContext.rootDiebackPerDay * time / Mathf.Max(1f, growthContext.dayLength);
+            if (rootDiebackProgress >= 1f)
+            {
+                rootDiebackProgress -= 1f;
+                ShedOutermostRoot();
+            }
             if (IsDormant)
             {
                 energyStored = 0f;
@@ -544,6 +776,10 @@ public class GrassInstance
             grassDensity -= 0.01f * time; // Wilting rate
             grassDensity = Mathf.Clamp01(grassDensity);
             energyStored = 5f;
+        }
+        else
+        {
+            rootDiebackProgress = 0f;
         }
         // Gains are capped at capacity above, so only the floor needs clamping here
         energyStored = Mathf.Max(energyStored, 0f);
@@ -583,6 +819,9 @@ public class GrassInstance
         public float starvedOutput;       // Photosynthesis multiplier with no leaf nitrogen
         public float outputGain;          // Rise above that as concentration climbs (saturating)
         public float outputHalfRatio;     // Concentration, as a share of target, at half that rise
+        public float focusStrength;       // Half-saturation factor at full nutrient focus (favoured nutrient divided, other multiplied)
+        public float rootTileUptake;      // Uptake from each root tile, relative to the plant's own tile, before root fit
+        public float phosphorusRootAccess;// Share of phosphorus roots draw away from the plant's own tile, relative to nitrogen
     }
 
     // Uptake runs on energy: full speed down to this share of capacity, slowing to nothing as the plant starves
@@ -610,35 +849,99 @@ public class GrassInstance
         if (!IsDormant)
         {
             // Same floor as energy capacity, so seedlings can still feed
-            float sizeShare = EnergyCapacity / MAX_ENERGY_CAPACITY;
+            float sizeShare = SizeShare;
             float power = Mathf.Clamp01(energyStored / (EnergyCapacity * UPTAKE_FULL_POWER_ENERGY));
             float capacity = context.maxUptake * sizeShare * power;
 
-            float nitrogenTaken = TakeNutrient(ref tile.availableNitrogen, leafNitrogen, context.leafNitrogenTarget * grassDensity, capacity, context.tileHalfSaturation);
-            leafNitrogen += nitrogenTaken;
-
             // Plants that can't flower have no use for phosphorus
+            float nitrogenTarget = context.leafNitrogenTarget * grassDensity;
             float phosphorusTarget = genome.GetTraitValue(TraitId.FloweringEnergyThreshold) > 0.0001f ? context.phosphorusTarget * sizeShare : 0f;
-            float phosphorusTaken = TakeNutrient(ref tile.availablePhosphorus, phosphorusReserve, phosphorusTarget, capacity, context.tileHalfSaturation);
-            phosphorusReserve += phosphorusTaken;
+            nitrogenHunger = Hunger(leafNitrogen, nitrogenTarget);
+            phosphorusHunger = Hunger(phosphorusReserve, phosphorusTarget);
 
-            energyStored = Mathf.Max(0f, energyStored - (nitrogenTaken + phosphorusTaken) * context.uptakeEnergyCost);
+            if (NutrientHunger > 0f && capacity > 0f)
+            {
+                // Nutrient focus shifts how well the roots scavenge each nutrient from poor soil (its half-saturation), like a
+                // plant investing in high-affinity transporters for one nutrient rather than the other
+                float focusScale = FocusScale(context.focusStrength);
+                RootUptake uptake = new RootUptake
+                {
+                    nitrogenCapacity = capacity * nitrogenHunger,
+                    phosphorusCapacity = capacity * phosphorusHunger,
+                    nitrogenHalfSaturation = context.tileHalfSaturation * focusScale,
+                    phosphorusHalfSaturation = context.tileHalfSaturation / focusScale,
+                    nitrogenRoom = Mathf.Max(0f, nitrogenTarget - leafNitrogen),
+                    phosphorusRoom = Mathf.Max(0f, phosphorusTarget - phosphorusReserve)
+                };
+
+                // Own tile first, then each root tile, scaled by how well the plant's roots work in that tile's water
+                uptake.TakeFrom(tile, 1f, 1f);
+                if (rootCount > 0 && tile.rootZone != null)
+                {
+                    float hydrationRequirement = genome.GetTraitValue(TraitId.HydrationRequirement);
+                    EnvironmentData[] zone = tile.rootZone;
+                    uint roots = rootMask & ~RootZone.BASE_BIT;
+                    for (int i = 1; roots != 0 && i < RootZone.SIZE; i++)
+                    {
+                        uint bit = 1u << i;
+                        if ((roots & bit) == 0)
+                            continue;
+                        roots &= ~bit;
+                        EnvironmentData soil = zone[i];
+                        if (soil != null)
+                        {
+                            uptake.TakeFrom(soil, context.rootTileUptake * RootFit(soil.hydration, hydrationRequirement), context.phosphorusRootAccess);
+                        }
+                    }
+                }
+
+                leafNitrogen += uptake.nitrogenTaken;
+                phosphorusReserve += uptake.phosphorusTaken;
+                energyStored = Mathf.Max(0f, energyStored - (uptake.nitrogenTaken + uptake.phosphorusTaken) * context.uptakeEnergyCost);
+            }
         }
 
         float ratio = LeafNitrogenRatio(context.leafNitrogenTarget);
         nitrogenFactor = context.starvedOutput + context.outputGain * ratio / (ratio + context.outputHalfRatio);
     }
 
-    private static float TakeNutrient(ref double pool, float held, float target, float capacity, float halfSaturation)
+    private static float Hunger(float held, float target)
     {
-        if (held >= target)
-            return 0f;
+        return target > 0f ? Mathf.Clamp01(1f - held / target) : 0f;
+    }
 
-        double available = System.Math.Max(0.0, pool);
-        float hunger = 1f - held / target;
-        float taken = (float)System.Math.Min(capacity * hunger * available / (available + halfSaturation), System.Math.Min(available, target - held));
-        pool -= taken;
-        return taken;
+    /// <summary>
+    /// One uptake pass through the roots. Each tile gives capacity x root weight x A / (A + half-saturation), where A is
+    /// what the tile holds, until the plant has no room left. Plants rooted in the same tile draw on the same pool.
+    /// </summary>
+    private struct RootUptake
+    {
+        public float nitrogenCapacity;
+        public float phosphorusCapacity;
+        public float nitrogenHalfSaturation;
+        public float phosphorusHalfSaturation;
+        public float nitrogenRoom;
+        public float phosphorusRoom;
+        public float nitrogenTaken;
+        public float phosphorusTaken;
+
+        public void TakeFrom(EnvironmentData soil, float rootWeight, float phosphorusAccess)
+        {
+            nitrogenTaken += Take(ref soil.availableNitrogen, nitrogenCapacity * rootWeight, nitrogenHalfSaturation, ref nitrogenRoom);
+            phosphorusTaken += Take(ref soil.availablePhosphorus, phosphorusCapacity * rootWeight * phosphorusAccess, phosphorusHalfSaturation, ref phosphorusRoom);
+        }
+
+        private static float Take(ref double pool, float capacity, float halfSaturation, ref float room)
+        {
+            if (room <= 0f || capacity <= 0f)
+                return 0f;
+
+            double available = System.Math.Max(0.0, pool);
+            float taken = (float)System.Math.Min(capacity * available / (available + halfSaturation), System.Math.Min(available, room));
+            pool -= taken;
+            room -= taken;
+            return taken;
+        }
     }
 
     private const int ESTABLISH_DAYS = 3;
@@ -717,12 +1020,6 @@ public class GrassInstance
             return false;
         
         return true;
-    }
-
-    public void Die()
-    {
-        if (genome == null)
-            return;
     }
 
     internal void EnterDormancy(float dormancyRate)

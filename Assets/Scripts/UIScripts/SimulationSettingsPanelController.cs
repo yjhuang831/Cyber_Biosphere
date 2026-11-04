@@ -200,27 +200,11 @@ public class SimulationSettingsPanelController : MonoBehaviour
         }
     }
 
-    public void ApplyAllSettings()
-    {
-        ApplyLocalSettings();
-
-        if (IsSimulationScene(SceneManager.GetActiveScene()))
-        {
-            ApplySimulationSettings();
-        }
-    }
-
     public void ApplyLocalSettings()
     {
         LogLocalSettings("ApplyLocalSettings");
         ApplyAutoSaveSettingsToActiveTimeController();
         SimulationSnapshotConstants.MaxAutosaveFiles = Mathf.Max(1, maxAutosaveFiles);
-    }
-
-    public void ApplySimulationSettings()
-    {
-        SetMaxSeedsPerTile(maxSeedsPerTile);
-        ApplyPlantSettingsToActiveManager();
     }
 
     public void SyncLocalControlsFromValues()
@@ -327,18 +311,6 @@ public class SimulationSettingsPanelController : MonoBehaviour
         LogSettingChanged(
             "Autosave TimeController apply",
             "enabled=" + timeController.enableAutoSave + ", interval=" + timeController.autoSaveIntervalSeconds + "s");
-    }
-
-    private void ApplyPlantSettingsToActiveManager()
-    {
-        GrassManager grassManager = GetActiveGrassManager();
-        if (grassManager == null)
-            return;
-
-        grassManager.SetMetabolismCostPerAllele(metabolismCostPerAllele);
-        grassManager.SetPlantAging(plantAging);
-        grassManager.SetAgingRate(agingRate);
-        grassManager.SetBaseGrowthCost(baseGrowthCost);
     }
 
     private static SeedManager GetActiveSeedManager()

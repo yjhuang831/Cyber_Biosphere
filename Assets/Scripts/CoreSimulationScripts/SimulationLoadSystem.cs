@@ -76,22 +76,6 @@ public static class SimulationLoadSystem
         return loaded;
     }
 
-    public static bool LoadSnapshotByIdentifier(
-        string fileNameOrPath,
-        TimeController timeController,
-        EnvironmentManager environmentManager,
-        GrassManager grassManager,
-        SeedManager seedManager)
-    {
-        if (!TryResolveSnapshotPath(fileNameOrPath, out string resolvedPath))
-        {
-            Debug.LogWarning("Load failed: could not resolve save file from input '" + fileNameOrPath + "'.");
-            return false;
-        }
-
-        return LoadSnapshotFromPath(resolvedPath, timeController, environmentManager, grassManager, seedManager);
-    }
-
     public static bool LoadSnapshotFromPath(
         string snapshotPath,
         TimeController timeController,
@@ -257,7 +241,7 @@ public static class SimulationLoadSystem
     }
 
     /// <summary>
-    /// Saves before schema 11 have no named genera; their plants are grouped at the next daily update.
+    /// Saves before schema 11 have no named genera; their plants are grouped by GrassManager.RebuildGeneraAfterLoad.
     /// </summary>
     private static void RestoreGenera(SimulationSnapshot snapshot, PlantGenome[] genomes, GenusTracker tracker)
     {
@@ -384,6 +368,7 @@ public static class SimulationLoadSystem
                     continue; // Duplicate entry for a tile; keep the first
 
                 GrassInstance grass = DeserializeGrass(state, tilePos, genome, LookupGenome(genomes, state.seedGenomeIndex));
+                grass.ValidateRoots(env, state.rootMask < 0 && grass.established);
                 env.grass = grass;
                 grassManager.activeGrassInstances[tilePos] = grass;
                 loadedPlantCount++;
@@ -421,6 +406,7 @@ public static class SimulationLoadSystem
         }
 
         grassManager.UpdateShade();
+        grassManager.RebuildGeneraAfterLoad();
         grassManager.plantCount = loadedPlantCount;
         seedManager.seedCount = loadedSeedCount;
 
@@ -536,6 +522,7 @@ public static class SimulationLoadSystem
         grass.nightEffect = source.nightEffect > 0f ? source.nightEffect : 1f;
         grass.leafNitrogen = Mathf.Max(0f, source.leafNitrogen);
         grass.phosphorusReserve = Mathf.Max(0f, source.phosphorusReserve);
+        grass.rootMask = source.rootMask >= 0 ? (uint)source.rootMask : RootZone.BASE_BIT; // Checked against the map in ApplySnapshot
         grass.starchCapacity = Mathf.Max(0f, source.starchCapacity); // 0 for pre-schema-12 saves; redeveloped after load
         grass.starchStored = Mathf.Clamp(source.starchStored, 0f, grass.starchCapacity);
         grass.lastCloneDay = source.lastCloneDay;
@@ -559,7 +546,6 @@ public static class SimulationLoadSystem
         return new Seed
         {
             carriedGenome = genome,
-            parentGenus = source.parentGenus,
             storedEnergy = source.storedEnergy,
             phosphorus = Mathf.Max(0f, source.phosphorus),
             germinationEnergy = source.germinationEnergy,

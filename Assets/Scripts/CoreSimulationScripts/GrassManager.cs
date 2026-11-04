@@ -23,6 +23,8 @@ public class GrassManager : MonoBehaviour
     [Tooltip("Genetic distance at which two plants can no longer breed; below it, pollination odds fall in proportion to distance. " +
              "Unrelated wild plants average about 0.55. Lower = more genera, sooner.")]
     [Min(0.01f)] public float maxBreedingDistance = 0.35f;
+    [Tooltip("Real (unscaled) seconds between full genus groupings of living plants. Seeds are checked only when dispersed and when they sprout.")]
+    [Min(1f)] public float genusGroupingIntervalSeconds = 60f;
 
     [Header("Quick Start")]
     [Tooltip("Share of map tiles SpawnRandomGrasses plants, e.g. 0.02 = 2% of tiles (18 plants on a 30x30 map).")]
@@ -70,6 +72,30 @@ public class GrassManager : MonoBehaviour
     [Tooltip("How many times per sim day plants re-check their neighbours for shade.")]
     [Min(1)] public int shadeUpdatesPerDay = 6;
 
+    [Header("Roots and Nutrient Focus")]
+    [Tooltip("Root tiles a day a plant short of nutrients can grow (a well-fed one grows at 30% of this). Roots grow one tile at a time, orthogonally, within the RootReach gene's distance.")]
+    [Min(0f)] public float rootGrowthPerDay = 2f;
+    [Tooltip("Energy to grow one root tile, for a full-size plant (smaller plants pay less).")]
+    [Min(0f)] public float rootBuildEnergyPerTile = 15f;
+    [Tooltip("Energy per sim second to keep one root tile alive, for a full-size plant (smaller plants pay less).")]
+    [Min(0f)] public float rootUpkeepPerTile = 0.004f;
+    [Tooltip("Root tiles lost per sim day while a plant is wilting from lack of energy, outermost first.")]
+    [Min(0f)] public float rootDiebackPerDay = 2f;
+    [Tooltip("Uptake from each root tile, relative to the plant's own tile, for a plant whose water needs suit that tile.")]
+    [Min(0f)] public float rootTileUptake = 0.25f;
+    [Tooltip("Roots grow while the plant's nutrient hunger (0 = on target, 1 = none) is above this. Lower means larger root systems.")]
+    [Range(0f, 1f)] public float rootHungerSetPoint = 0.15f;
+    [Tooltip("A new root only grows into a tile at least this good (0-1): how readily it gives what the plant lacks, times the plant's water fit there.")]
+    [Range(0f, 1f)] public float rootMinTileQuality = 0.25f;
+    [Tooltip("A root in a tile that falls below this quality is shed, one a day.")]
+    [Range(0f, 1f)] public float rootShedQuality = 0.12f;
+    [Tooltip("A plant whose nutrient hunger is below this sheds its least useful root, one a day.")]
+    [Range(0f, 1f)] public float rootShedHunger = 0.04f;
+    [Tooltip("Share of phosphorus roots draw from root tiles, relative to nitrogen. Phosphate barely moves in soil.")]
+    [Range(0f, 1f)] public float phosphorusRootAccess = 0.5f;
+    [Tooltip("Half-saturation factor at full nutrient focus (-1 or +1): the favoured nutrient's is divided by this, the other's multiplied.")]
+    [Min(1f)] public float nutrientFocusStrength = 2f;
+
     // Collection of active grass instances for individual updates
     internal Dictionary<Vector3Int, GrassInstance> activeGrassInstances = new Dictionary<Vector3Int, GrassInstance>();
     
@@ -82,7 +108,8 @@ public class GrassManager : MonoBehaviour
     internal readonly GenusTracker genusTracker = new GenusTracker();
     private readonly List<GrassInstance> plantsToUpdate = new List<GrassInstance>();
     private readonly List<PlantGenome> plantGenomesScratch = new List<PlantGenome>();
-    private readonly List<PlantGenome> seedGenomesScratch = new List<PlantGenome>();
+    private float genusGroupingTimer = 0f;
+    private readonly List<GrassInstance> nutrientOrder = new List<GrassInstance>();
     private const int NEIGHBORS_PER_TILE = 8;
     private float shadeTimer = 0f;
 
@@ -92,13 +119,30 @@ public class GrassManager : MonoBehaviour
         positionListPool = new ListPool<Vector3Int>(LIST_POS_POOL_SIZE, 16);
     }
 
-    internal void UpdateAllGrassInstances(float simTime)
+    internal GrassInstance.PlantGrowthContext BuildGrowthContext()
     {
-        GrassInstance.PlantGrowthContext growthContext = new GrassInstance.PlantGrowthContext
+        return new GrassInstance.PlantGrowthContext
         {
             shortestGrowthEnergy = shortestGrowthEnergy,
-            tallestGrowthEnergy = tallestGrowthEnergy
+            tallestGrowthEnergy = tallestGrowthEnergy,
+            dayLength = TimeController.fullDayLength,
+            rootGrowthPerDay = rootGrowthPerDay,
+            rootBuildEnergyPerTile = rootBuildEnergyPerTile,
+            rootUpkeepPerTile = rootUpkeepPerTile,
+            rootDiebackPerDay = rootDiebackPerDay,
+            rootHungerSetPoint = rootHungerSetPoint,
+            rootMinTileQuality = rootMinTileQuality,
+            rootShedQuality = rootShedQuality,
+            rootShedHunger = rootShedHunger,
+            halfSaturation = nutrientHalfSaturation,
+            focusStrength = nutrientFocusStrength,
+            phosphorusRootAccess = phosphorusRootAccess
         };
+    }
+
+    internal void UpdateAllGrassInstances(float simTime)
+    {
+        GrassInstance.PlantGrowthContext growthContext = BuildGrowthContext();
 
         shadeTimer += simTime;
         if (shadeTimer >= TimeController.fullDayLength / Mathf.Max(1, shadeUpdatesPerDay))
@@ -139,12 +183,13 @@ public class GrassManager : MonoBehaviour
 
                 // After the day's ageing (which reflects yesterday's state), decide dormancy from yesterday's daylight
                 grassInstance.DailyDormancyDecision();
+                grassInstance.DailyRootShedding(data, in growthContext);
             }
 
             grassInstance.PerformMetabolism(data, metabolismCostPerAllele, simTime, baseGrowthCost, TimeController.isNight, growthContext);
 
             // Check if grass should reproduce (handles energy deduction internally)
-            if (!grassInstance.IsDormant && grassInstance.LeafNitrogenRatio(leafNitrogenTarget) >= cloneMinNitrogenRatio && grassInstance.CheckAndHandleSpread() && TryUseCloneAttempt(grassInstance))
+            if (!grassInstance.IsDormant && grassInstance.rootCount > 0 && grassInstance.LeafNitrogenRatio(leafNitrogenTarget) >= cloneMinNitrogenRatio && grassInstance.CheckAndHandleSpread() && TryUseCloneAttempt(grassInstance))
             {
                 SpreadIndividualGrass(tilePos, data);
             }
@@ -195,7 +240,9 @@ public class GrassManager : MonoBehaviour
     }
 
     /// <summary>
-    /// Each plant's nitrogen turnover and feeding from its own tile. Runs with the tile nutrient pass, over the time since the last one.
+    /// Each plant's nitrogen turnover and feeding through its roots. Runs with the tile nutrient pass, over the time since
+    /// the last one. Plants rooted in the same tiles draw on the same pools, so the pass starts at a random plant each
+    /// time rather than always favouring the same ones.
     /// </summary>
     internal void UpdatePlantNutrients(float simTime)
     {
@@ -210,12 +257,20 @@ public class GrassManager : MonoBehaviour
             turnoverReturnShare = nitrogenTurnoverReturnShare,
             starvedOutput = nitrogenStarvedOutput,
             outputGain = nitrogenOutputGain,
-            outputHalfRatio = nitrogenOutputHalfRatio
+            outputHalfRatio = nitrogenOutputHalfRatio,
+            focusStrength = nutrientFocusStrength,
+            rootTileUptake = rootTileUptake,
+            phosphorusRootAccess = phosphorusRootAccess
         };
 
-        foreach (KeyValuePair<Vector3Int, GrassInstance> entry in activeGrassInstances)
+        nutrientOrder.Clear();
+        nutrientOrder.AddRange(activeGrassInstances.Values);
+        int count = nutrientOrder.Count;
+        int start = count > 0 ? Random.Range(0, count) : 0;
+        for (int k = 0; k < count; k++)
         {
-            entry.Value.UpdateNutrients(mapManager.GetTileEnvironmentData(entry.Key), in context);
+            GrassInstance grass = nutrientOrder[(start + k) % count];
+            grass.UpdateNutrients(mapManager.GetTileEnvironmentData(grass.tilePosition), in context);
         }
     }
 
@@ -251,11 +306,13 @@ public class GrassManager : MonoBehaviour
     {
         PlantGenome parentGenome = originData.grass.genome;
 
-        if (originData.immediateNeighbors.Count == 0)
+        // Clones start only on one of the parent's root tiles, as rhizomes and runners do
+        int rootSlot = originData.grass.RandomRootSlot();
+        if (rootSlot < 0)
             return;
-
-        int randomIndex = Random.Range(0, originData.immediateNeighbors.Count);
-        Vector3Int spreadPos = originData.immediateNeighbors[randomIndex];
+        Vector3Int spreadPos = origin + RootZone.Offsets[rootSlot];
+        if (!mapManager.IsValidTilePosition(spreadPos))
+            return;
 
         EnvironmentData targetData = mapManager.GetTileEnvironmentData(spreadPos);
 
@@ -300,25 +357,20 @@ public class GrassManager : MonoBehaviour
         tile.availablePhosphorus += (grass.phosphorusReserve + grass.seedPhosphorus) * nutrientReturnShare;
     }
 
-    internal void SpawnNewGrass(EnvironmentData targetData, Vector3Int gridposition, PlantGenome genome = null, float iniEnergy = 0f, string parentGenus = null, BirthCause cause = BirthCause.Player)
+    internal void SpawnNewGrass(EnvironmentData targetData, Vector3Int gridposition, PlantGenome genome = null, float iniEnergy = 0f, BirthCause cause = BirthCause.Player)
     {
         ResearchCounters.RecordBirth(cause);
         bool hadGrass = targetData.grass != null;
         ReturnPlantToTile(targetData.grass, targetData); // Should not happen (callers spawn on empty tiles)
-        PlantGenome newGenome = null;
-        bool isSavedSpecies = false;
-        
-        if (genome == null)
+        PlantGenome newGenome = genome ?? geneManager.GenerateNewGenome(targetData, true);
+        if (cause == BirthCause.Seedling && newGenome.genusId != PlantGenome.NO_GENUS)
         {
-            newGenome = geneManager.GenerateNewGenome(targetData, true);
-            isSavedSpecies = false;
+            genusTracker.PlaceSprout(newGenome, maxBreedingDistance, TimeController.simDaysSinceStart); // A seed's second genus check
         }
         else
         {
-            newGenome = genome;
-            isSavedSpecies = true;
+            EnsureGenusAssigned(newGenome);
         }
-        EnsureGenusAssigned(newGenome);
 
         targetData.grass = new GrassInstance(gridposition, newGenome);
         if (genome != null)
@@ -354,34 +406,72 @@ public class GrassManager : MonoBehaviour
     }
 
     /// <summary>
-    /// Daily genus update (called at dawn) over all plants, seeds on the ground, and seeds still forming on plants.
+    /// Counts real (unscaled) time while the simulation runs and regroups living plants into genera every
+    /// genusGroupingIntervalSeconds. Called by TimeController each unpaused frame.
     /// </summary>
-    internal void UpdateGenera()
+    internal void TickGenusGrouping(float unscaledDeltaTime)
+    {
+        genusGroupingTimer += unscaledDeltaTime;
+        if (genusGroupingTimer < Mathf.Max(1f, genusGroupingIntervalSeconds))
+            return;
+        genusGroupingTimer = 0f;
+        GroupPlantGenera();
+    }
+
+    /// <summary>
+    /// Full genus grouping of all living plants (genetic comparisons). Seeds are not scanned; see GenusTracker.
+    /// </summary>
+    internal void GroupPlantGenera(bool removeExtinct = true)
+    {
+        CollectPlantGenomes();
+        genusTracker.GroupPlants(plantGenomesScratch, maxBreedingDistance, TimeController.simDaysSinceStart, removeExtinct);
+    }
+
+    /// <summary>
+    /// Daily (dawn) plant recount per genus, without genetic comparisons, so the research log stays current.
+    /// </summary>
+    internal void RecountGenera()
+    {
+        CollectPlantGenomes();
+        genusTracker.RecountPlants(plantGenomesScratch);
+    }
+
+    private void CollectPlantGenomes()
     {
         plantGenomesScratch.Clear();
-        seedGenomesScratch.Clear();
-
         foreach (GrassInstance grass in activeGrassInstances.Values)
         {
             plantGenomesScratch.Add(grass.genome);
-            if (grass.seedGenome != null)
-            {
-                seedGenomesScratch.Add(grass.seedGenome);
-            }
         }
+    }
 
+    /// <summary>
+    /// After a load: groups the plants, then counts the loaded seeds into their genera (checking only seeds whose genus
+    /// is missing). Nothing is removed until the seeds are counted, so genera alive only as seeds survive.
+    /// </summary>
+    internal void RebuildGeneraAfterLoad()
+    {
+        genusTracker.ClearSeedCounts();
+        GroupPlantGenera(false);
         if (seedManager != null)
         {
             foreach (List<Seed> seeds in seedManager.activeSeeds.Values)
             {
                 for (int i = 0; i < seeds.Count; i++)
                 {
-                    seedGenomesScratch.Add(seeds[i].carriedGenome);
+                    Seed seed = seeds[i];
+                    if (!genusTracker.TryGetGenus(seed.carriedGenome.genusId, out GenusRecord genus))
+                    {
+                        genus = genusTracker.ClassifySeed(seed.carriedGenome, null, maxBreedingDistance, TimeController.simDaysSinceStart);
+                    }
+                    genusTracker.AddSeed(genus);
+                    seed.genusId = genus.id;
+                    seeds[i] = seed;
                 }
             }
         }
-
-        genusTracker.UpdateDaily(plantGenomesScratch, seedGenomesScratch, maxBreedingDistance, TimeController.simDaysSinceStart);
+        genusTracker.RemoveExtinct();
+        genusGroupingTimer = 0f;
     }
 
     /// <summary>
@@ -456,45 +546,6 @@ public class GrassManager : MonoBehaviour
             }
         }
         return spawned;
-    }
-
-    /// <summary>
-    /// Spawns grass on a specific tile using a provided runtime genome.
-    /// Returns false if the tile is invalid, occupied, or required managers are missing.
-    /// </summary>
-    public bool SpawnGrassAtTile(Vector3Int tilePosition, PlantGenome genome, float initialEnergy = 0f, string parentGenus = null)
-    {
-        if (mapManager == null)
-        {
-            Debug.LogWarning("SpawnGrassAtTile failed: MapManager reference is missing.");
-            return false;
-        }
-
-        if (!mapManager.IsValidTilePosition(tilePosition))
-        {
-            return false;
-        }
-
-        EnvironmentData targetData = mapManager.GetTileEnvironmentData(tilePosition);
-        if (targetData == null || targetData.grass != null)
-        {
-            return false;
-        }
-
-        if (genome == null)
-        {
-            Debug.LogWarning("SpawnGrassAtTile failed: genome is null.");
-            return false;
-        }
-
-        EnsureGenusAssigned(genome);
-        targetData.grass = new GrassInstance(tilePosition, genome);
-        targetData.grass.energyStored = initialEnergy;
-        activeGrassInstances[tilePosition] = targetData.grass;
-        plantCount = IncrementWithWrap(plantCount);
-        ResearchCounters.RecordBirth(BirthCause.Player);
-        mapManager.UpdateGrassTile(targetData, tilePosition);
-        return true;
     }
 
     /// <summary>
@@ -575,7 +626,14 @@ public class GrassManager : MonoBehaviour
             {
                 for (int i = 0; i < seeds.Count; i++)
                 {
-                    RenameGenome(seeds[i].carriedGenome, speciesGuid, oldSpecies, oldGenusId, genus, newSpecies);
+                    Seed seed = seeds[i];
+                    RenameGenome(seed.carriedGenome, speciesGuid, oldSpecies, oldGenusId, genus, newSpecies);
+                    if (genus != null && genus.id != oldGenusId && seed.genusId == oldGenusId && seed.carriedGenome.genusId == genus.id)
+                    {
+                        genusTracker.MoveSeed(oldGenusId, genus);
+                        seed.genusId = genus.id;
+                        seeds[i] = seed;
+                    }
                 }
             }
         }
@@ -645,7 +703,6 @@ public class GrassManager : MonoBehaviour
         {
             ResearchCounters.RecordDeath(cause);
             ReturnPlantToTile(data.grass, data);
-            data.grass.Die(); // Handle any cleanup in the GrassInstance itself
             if (plantCount > 0)
             {
                 plantCount -= 1;
@@ -661,8 +718,12 @@ public class GrassManager : MonoBehaviour
         {
             if (!data.grass.IsAlive())
             {
-                // Grass died (starvation, dormancy timeout, or withering)
+                // Grass died (starvation, dormancy timeout, withering, or failing to establish); waiting seedlings get first claim
                 RemoveGrassInstance(tilePos, data, data.grass.GetDeathCause());
+                if (seedManager != null)
+                {
+                    seedManager.OnTileFreed(tilePos, data);
+                }
             }
             else
             {
@@ -824,6 +885,8 @@ public class GrassManager : MonoBehaviour
         float energyPerSeed = parent.seedingEnergy / seedCount;
         float phosphorusPerSeed = parent.seedPhosphorus / seedCount;
         EnvironmentData parentTile = mapManager.GetTileEnvironmentData(parentPos);
+        // A seed's first genus check; siblings share the genome, so once per dispersal
+        GenusRecord seedGenus = genusTracker.ClassifySeed(parent.seedGenome, parent.genome, maxBreedingDistance, TimeController.simDaysSinceStart);
         // Seed provisioning traits come from the mother, like germination energy and sprout stage
         float germinationEnergy = parent.genome.GetTraitValue(TraitId.GerminationEnergy);
         byte sproutStage = (byte)parent.genome.GetTraitValue(TraitId.SproutStage);
@@ -845,7 +908,7 @@ public class GrassManager : MonoBehaviour
             bool added = seedManager.TryAddSeed(tile, new Seed
             {
                 carriedGenome = parent.seedGenome,
-                parentGenus = parent.genome.genus,
+                genusId = seedGenus.id,
                 storedEnergy = energyPerSeed,
                 phosphorus = phosphorusPerSeed,
                 germinationEnergy = germinationEnergy,
@@ -854,7 +917,11 @@ public class GrassManager : MonoBehaviour
                 germinationCue = germinationCue,
                 coldPreservation = coldPreservation
             });
-            if (!added)
+            if (added)
+            {
+                genusTracker.AddSeed(seedGenus);
+            }
+            else
             {
                 ResearchCounters.Today.seedsLost++; // Tile already at the seed cap
                 parentTile.availablePhosphorus += phosphorusPerSeed;

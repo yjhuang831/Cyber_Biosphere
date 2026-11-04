@@ -24,10 +24,10 @@ internal class GenusRecord
     public List<SpeciesRecord> species = new List<SpeciesRecord>();
     public int nextSpeciesIndex = 1;
     public PlantGenome[] representatives = new PlantGenome[GenusTracker.REPRESENTATIVES]; // Recent members; slots may be null
-    public int plants;              // Counts from the latest daily update
-    public int seeds;
+    public int plants;              // Recounted daily and at each grouping
+    public int seeds;               // Kept current as seeds are made and die (see Seed.genusId)
 
-    // Working state during UpdateDaily: reservoir sample for the next representatives
+    // Working state during GroupPlants: reservoir sample for the next representatives
     public PlantGenome[] nextRepresentatives = new PlantGenome[GenusTracker.REPRESENTATIVES];
     public int candidatesSeen;
 
@@ -69,12 +69,15 @@ internal static class BinomialNames
 
 /// <summary>
 /// Groups plants into genera: populations that can no longer breed with each other.
-/// Plants inherit their mother's genus and names at birth. Once a day each plant (and seed) is measured against a few
-/// representatives of its genus and stays if it could breed with any of them, so the routine cost is a few
-/// GeneticDistance calls per individual however many genera exist. Only individuals that fit none are compared with
-/// other genera, and those that fit nowhere found a new genus if enough of them form a group (lone oddballs stay put).
-/// Representatives are random current members, re-picked daily, so a genus can drift over time without being split,
-/// while a subgroup that has become unable to breed with the rest splits off.
+/// Plants inherit their mother's genus at birth. Every few real minutes (GroupPlants) each living plant is measured
+/// against a few representatives of its genus and stays if it could breed with any of them, so the routine cost is a
+/// few GeneticDistance calls per plant however many genera exist. Only plants that fit none are compared with other
+/// genera, and those that fit nowhere found a new genus if enough of them form a group (lone oddballs stay put).
+/// Representatives are random current members, re-picked at each grouping, so a genus can drift over time without being
+/// split, while a subgroup that has become unable to breed with the rest splits off.
+/// Seeds are checked only twice: once when they are dispersed (ClassifySeed) and once when they sprout (PlaceSprout).
+/// Each seed records the genus it was counted in, so seed counts stay exact between groupings and a genus lives on
+/// while any of its seeds do. Plant counts are recounted cheaply once a day (RecountPlants) for the research log.
 /// Genera never merge, and plants in different genera cannot breed (see GrassManager.SpreadPollen).
 /// Library genera carry a saved name and stay apart: nothing joins them or leaves them for a generated genus.
 /// Speciation within a genus is not implemented yet; a future pass would call AddNextSpecies and assign the new
@@ -85,15 +88,10 @@ internal class GenusTracker
     internal const int REPRESENTATIVES = 3;
     private const int MIN_SPLIT_GROUP = 5; // Fewer outliers than this stay in their genus rather than founding a new one
 
-    private struct Outlier
-    {
-        public PlantGenome genome;
-        public bool isSeed;
-    }
-
     private readonly Dictionary<int, GenusRecord> genera = new Dictionary<int, GenusRecord>();
-    private readonly List<Outlier> outliers = new List<Outlier>();
-    private readonly List<Outlier> unplaced = new List<Outlier>();
+    private readonly List<PlantGenome> outliers = new List<PlantGenome>();
+    private readonly List<PlantGenome> unplaced = new List<PlantGenome>();
+    private readonly List<PlantGenome> group = new List<PlantGenome>();
     private readonly List<int> extinctIds = new List<int>();
     private int nextGenusId = 1;
     private int nextGenusNameIndex = 1;
@@ -119,7 +117,7 @@ internal class GenusTracker
         {
             genus = Found(genome, PlantGenome.NO_GENUS, day);
         }
-        Join(new Outlier { genome = genome, isSeed = false }, genus, null);
+        Join(genome, genus, null);
     }
 
     /// <summary>
@@ -140,7 +138,7 @@ internal class GenusTracker
             species = new SpeciesRecord { name = speciesName, speciesGuid = speciesGuid };
             genus.species.Add(species);
         }
-        Join(new Outlier { genome = genome, isSeed = false }, genus, species);
+        Join(genome, genus, species);
     }
 
     /// <summary>
@@ -216,66 +214,179 @@ internal class GenusTracker
     }
 
     /// <summary>
-    /// The daily pass over all living plants and seeds. Seeds keep a genus alive and can split off like plants;
-    /// plants are preferred as representatives.
+    /// The periodic pass over all living plants: recounts them, re-picks representatives, moves plants that no longer
+    /// fit their genus, and removes genera with no plants or seeds left (unless removeExtinct is false).
+    /// A genus with only seeds keeps its previous representatives.
     /// </summary>
-    internal void UpdateDaily(List<PlantGenome> plantGenomes, List<PlantGenome> seedGenomes, float maxBreedingDistance, long day)
+    internal void GroupPlants(List<PlantGenome> plantGenomes, float maxBreedingDistance, long day, bool removeExtinct = true)
     {
         foreach (GenusRecord genus in genera.Values)
         {
             genus.plants = 0;
-            genus.seeds = 0;
             System.Array.Clear(genus.nextRepresentatives, 0, REPRESENTATIVES);
             genus.candidatesSeen = 0;
         }
 
         outliers.Clear();
-
         for (int i = 0; i < plantGenomes.Count; i++)
         {
             PlantGenome genome = plantGenomes[i];
             if (!FitsOwnGenus(genome, maxBreedingDistance, out GenusRecord genus))
             {
-                outliers.Add(new Outlier { genome = genome, isSeed = false });
+                outliers.Add(genome);
                 continue;
             }
             genus.plants++;
             ConsiderAsRepresentative(genus, genome);
         }
 
-        for (int i = 0; i < seedGenomes.Count; i++)
-        {
-            PlantGenome genome = seedGenomes[i];
-            if (!FitsOwnGenus(genome, maxBreedingDistance, out GenusRecord genus))
-            {
-                outliers.Add(new Outlier { genome = genome, isSeed = true });
-                continue;
-            }
-            genus.seeds++;
-            if (genus.plants == 0)
-            {
-                ConsiderAsRepresentative(genus, genome);
-            }
-        }
-
         PlaceOutliers(maxBreedingDistance, day);
 
+        foreach (GenusRecord genus in genera.Values)
+        {
+            if (genus.nextRepresentatives[0] != null)
+            {
+                System.Array.Copy(genus.nextRepresentatives, genus.representatives, REPRESENTATIVES);
+            }
+        }
+        if (removeExtinct)
+        {
+            RemoveExtinct();
+        }
+    }
+
+    /// <summary>
+    /// Cheap daily recount of plants by the genus they carry (no genetic comparisons), then removes genera with no
+    /// plants or seeds left. Keeps the research log's per-genus counts current between groupings.
+    /// </summary>
+    internal void RecountPlants(List<PlantGenome> plantGenomes)
+    {
+        foreach (GenusRecord genus in genera.Values)
+        {
+            genus.plants = 0;
+        }
+        for (int i = 0; i < plantGenomes.Count; i++)
+        {
+            if (genera.TryGetValue(plantGenomes[i].genusId, out GenusRecord genus))
+            {
+                genus.plants++;
+            }
+        }
+        RemoveExtinct();
+    }
+
+    internal void RemoveExtinct()
+    {
         extinctIds.Clear();
         foreach (GenusRecord genus in genera.Values)
         {
-            if (genus.plants + genus.seeds == 0)
+            if (genus.plants + genus.seeds <= 0)
             {
                 extinctIds.Add(genus.id);
-            }
-            else if (genus.nextRepresentatives[0] != null)
-            {
-                System.Array.Copy(genus.nextRepresentatives, genus.representatives, REPRESENTATIVES);
             }
         }
         for (int i = 0; i < extinctIds.Count; i++)
         {
             genera.Remove(extinctIds[i]);
             ResearchCounters.Today.generaExtinct++;
+        }
+    }
+
+    /// <summary>
+    /// Checks a newly made seed genome once, at dispersal. It stays in its genus if it could breed with it, otherwise
+    /// joins the closest genus of its kind it could breed with; failing both it stays with its own (or its mother's)
+    /// genus: a lone seed never founds a genus, though the plant it grows into may at a later grouping.
+    /// Seeds of one dispersal share their genome, so this runs once per dispersal. Does not count the seeds: the caller
+    /// adds each seed it actually places with AddSeed.
+    /// </summary>
+    internal GenusRecord ClassifySeed(PlantGenome genome, PlantGenome mother, float maxBreedingDistance, long day)
+    {
+        if (FitsOwnGenus(genome, maxBreedingDistance, out GenusRecord genus))
+            return genus;
+
+        bool hasOwn = genus != null;
+        GenusRecord motherGenus = null;
+        if (mother != null)
+        {
+            genera.TryGetValue(mother.genusId, out motherGenus);
+        }
+        bool fromLibrary = hasOwn ? genus.isLibrary : motherGenus != null && motherGenus.isLibrary;
+        GenusRecord closest = FindClosestGenus(genome, maxBreedingDistance, fromLibrary);
+        if (closest != null)
+        {
+            WriteGenus(genome, closest, null);
+            return closest;
+        }
+        if (hasOwn)
+            return genus;
+        if (motherGenus != null)
+        {
+            WriteGenus(genome, motherGenus, null);
+            return motherGenus;
+        }
+
+        // Only reached when no genus records it (e.g. a save without genera); seeds keep a genus alive, so found one
+        GenusRecord founded = Found(genome, PlantGenome.NO_GENUS, day);
+        WriteGenus(genome, founded, null);
+        return founded;
+    }
+
+    internal void AddSeed(GenusRecord genus)
+    {
+        genus.seeds++;
+    }
+
+    /// <summary>
+    /// A seed died or sprouted. genusId is the genus it was counted in (Seed.genusId), which may differ from its
+    /// genome's current genus if a sibling's sprouting moved their shared genome.
+    /// </summary>
+    internal void RemoveSeed(int genusId)
+    {
+        if (genera.TryGetValue(genusId, out GenusRecord genus) && genus.seeds > 0)
+        {
+            genus.seeds--;
+        }
+    }
+
+    internal void MoveSeed(int fromGenusId, GenusRecord to)
+    {
+        RemoveSeed(fromGenusId);
+        to.seeds++;
+    }
+
+    internal void ClearSeedCounts()
+    {
+        foreach (GenusRecord genus in genera.Values)
+        {
+            genus.seeds = 0;
+        }
+    }
+
+    /// <summary>
+    /// The second check a seed gets: when it sprouts. The seedling stays in its genus if it could breed with it,
+    /// otherwise joins the closest genus of its kind it could breed with; failing both it stays put until the next
+    /// grouping, where it may found a genus with others like it. Counted as a plant either way.
+    /// </summary>
+    internal void PlaceSprout(PlantGenome genome, float maxBreedingDistance, long day)
+    {
+        if (FitsOwnGenus(genome, maxBreedingDistance, out GenusRecord genus))
+        {
+            genus.plants++;
+            return;
+        }
+
+        GenusRecord closest = FindClosestGenus(genome, maxBreedingDistance, genus != null && genus.isLibrary);
+        if (closest != null)
+        {
+            Join(genome, closest, null);
+        }
+        else if (genus != null)
+        {
+            genus.plants++;
+        }
+        else
+        {
+            Assign(genome, maxBreedingDistance, day);
         }
     }
 
@@ -326,28 +437,27 @@ internal class GenusTracker
         unplaced.Clear();
         for (int i = 0; i < outliers.Count; i++)
         {
-            PlantGenome genome = outliers[i].genome;
+            PlantGenome genome = outliers[i];
             bool fromLibrary = genera.TryGetValue(genome.genusId, out GenusRecord currentGenus) && currentGenus.isLibrary;
             GenusRecord closest = FindClosestGenus(genome, maxBreedingDistance, fromLibrary);
             if (closest != null)
             {
-                Join(outliers[i], closest, null);
+                Join(genome, closest, null);
             }
             else
             {
-                unplaced.Add(outliers[i]);
+                unplaced.Add(genome);
             }
         }
 
         // Each pass takes the first remaining outlier and everyone who could breed with it
-        List<Outlier> group = new List<Outlier>();
         while (unplaced.Count > 0)
         {
-            PlantGenome groupFounder = unplaced[0].genome;
+            PlantGenome groupFounder = unplaced[0];
             group.Clear();
             for (int i = unplaced.Count - 1; i >= 0; i--)
             {
-                if (GeneManager.GeneticDistance(unplaced[i].genome, groupFounder) < maxBreedingDistance)
+                if (GeneManager.GeneticDistance(unplaced[i], groupFounder) < maxBreedingDistance)
                 {
                     group.Add(unplaced[i]);
                     unplaced.RemoveAt(i);
@@ -367,12 +477,20 @@ internal class GenusTracker
     }
 
     /// <summary>
+    /// Writes a genus and species onto a plant's genome and counts the plant.
+    /// </summary>
+    private void Join(PlantGenome genome, GenusRecord genus, SpeciesRecord species)
+    {
+        WriteGenus(genome, genus, species);
+        genus.plants++;
+    }
+
+    /// <summary>
     /// Writes a genus and species onto a genome. With no species given, a member keeps its species if the genus
     /// has it, and otherwise takes the genus's first.
     /// </summary>
-    private void Join(Outlier outlier, GenusRecord genus, SpeciesRecord species)
+    private void WriteGenus(PlantGenome genome, GenusRecord genus, SpeciesRecord species)
     {
-        PlantGenome genome = outlier.genome;
         if (species == null && genome.genusId == genus.id)
         {
             species = genus.FindSpecies(genome.species);
@@ -386,11 +504,6 @@ internal class GenusTracker
         genome.genusColor = genus.founderColor;
         genome.genus = genus.name;
         genome.species = species.name;
-
-        if (outlier.isSeed)
-            genus.seeds++;
-        else
-            genus.plants++;
     }
 
     private GenusRecord FindClosestGenus(PlantGenome genome, float maxBreedingDistance, bool library)

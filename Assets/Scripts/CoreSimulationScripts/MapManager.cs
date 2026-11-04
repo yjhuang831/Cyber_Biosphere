@@ -242,6 +242,7 @@ public class MapManager : MonoBehaviour
             }
         }
 
+        BuildRootZones();
         isInitialized = true;
         if (cameraController != null)
         {
@@ -682,6 +683,28 @@ public class MapManager : MonoBehaviour
                 // Center on the tile (add half tile size to center it properly)
                 tileWorldPos += terrainTilemap.cellSize * 0.5f;
                 cameraController.CenterOnPosition(tileWorldPos);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Caches, for every tile, direct references to the tiles a plant there could root into (see RootZone).
+    /// </summary>
+    private void BuildRootZones()
+    {
+        foreach (Vector3Int pos in allTilePositions)
+        {
+            EnvironmentData data = GetTileEnvironmentData(pos);
+            data.rootZone = new EnvironmentData[RootZone.SIZE];
+            data.rootZoneValid = 0u;
+            for (int i = 0; i < RootZone.SIZE; i++)
+            {
+                Vector3Int zonePos = pos + RootZone.Offsets[i];
+                if (IsValidTilePosition(zonePos))
+                {
+                    data.rootZone[i] = GetTileEnvironmentData(zonePos);
+                    data.rootZoneValid |= 1u << i;
+                }
             }
         }
     }

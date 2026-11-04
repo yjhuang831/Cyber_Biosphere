@@ -26,7 +26,6 @@ public class TimeController : MonoBehaviour
     private float environmentUpdateInterval = 0.5f;
     private float grassUpdateInterval = 0.4f;
     private float oxygenDiffusionInterval = 10f;
-    private float pruneInterval = 30f; // Prune species every 30 real seconds
     private float visualUpdateInterval = 0.1f; // Refresh overlays at 10 Hz: each refresh visits every tile, and they change slowly.
     private float dayNightInterval = 0.2f; // Update day-night cycle every 0.2 sim seconds
 
@@ -44,9 +43,9 @@ public class TimeController : MonoBehaviour
     private ResearchLogger researchLogger;
 
     [Header("Per-Subsystem Timers (real-time only)")]
-    private float pruneTimer = 0f;
     private float visualTimer = 0f;
     private float smoothRunTimer = 0f;
+    private int overloadedFrames = 0;   // Consecutive frames that ran out of tick budget
     /// <summary>
     /// Sim seconds since day 0's dawn. Derived from the day counter so it stays exact in long runs
     /// (a float accumulator stops advancing by 0.04 s ticks after ~1M sim seconds, about 4 sim years).
@@ -214,6 +213,8 @@ public class TimeController : MonoBehaviour
 
         if (targetTimeScale <= 0.01f) return;   // paused
 
+        grassManager.TickGenusGrouping(unscaledDeltaTime);
+
         if (simTimeScale > targetTimeScale)
         {
             // Smoothly reduce time scale if we're above target (e.g. after a performance hiccup)
@@ -226,7 +227,7 @@ public class TimeController : MonoBehaviour
 
         accumulator += unscaledDeltaTime * simTimeScale; // Convert real time to simulation time
 
-        if (smoothRunTimer > 4f && simTimeScale < targetTimeScale)
+        if (smoothRunTimer > 3f && simTimeScale < targetTimeScale)
         {
             // Smoothly increase time scale back to target after we've been running smoothly for a while
             simTimeScale += 0.5f;
@@ -269,17 +270,25 @@ public class TimeController : MonoBehaviour
 
         if (ticks >= tickBudget && accumulator >= simTick)
         {
-            smoothRunTimer = 0f; // reset smooth run timer if we had to skip updates
             accumulator = Mathf.Min(accumulator, simTick * 0.5f);
+            // A single slow frame (e.g. dawn) just drops its backlog; only a second one in a row lowers the speed
+            overloadedFrames++;
+            if (overloadedFrames < 2)
+                return;
+            smoothRunTimer = 0f; // reset smooth run timer if we had to skip updates
             float sustainableScale = maxSimTimePerFrame / Mathf.Max(unscaledDeltaTime, 0.0001f);
             simTimeScale = Mathf.Clamp(
                 Mathf.Min(simTimeScale, sustainableScale),
                 Mathf.Min(minRegulatedTimeScale, targetTimeScale),
                 targetTimeScale);
         }
-        else if (smoothRunTimer < 6f)
+        else
         {
-            smoothRunTimer += unscaledDeltaTime;
+            overloadedFrames = 0;
+            if (smoothRunTimer < 6f)
+            {
+                smoothRunTimer += unscaledDeltaTime;
+            }
         }
     }
 
@@ -446,7 +455,6 @@ public class TimeController : MonoBehaviour
         autoSaveTimer = 0f;
         dayTimeAccumulator = 0f;
         smoothRunTimer = 0f;
-        pruneTimer = 0f;
         visualTimer = 0f;
         simTickCount = 0;
         oxygenPending = false;
@@ -556,14 +564,6 @@ public class TimeController : MonoBehaviour
         seedCountText.text = "#Seeds: " + seedManager.seedCount.ToString();
     }
 
-    /// <summary>
-    /// Gets current FPS.
-    /// </summary>
-    public float GetCurrentFPS()
-    {
-        return currentFps;
-    }
-
     private static void SetSimTimeText(double totalSeconds, Text simTimeText)
     {
         long seconds = (long)System.Math.Round(totalSeconds); // long: int overflows after ~68 years of sim seconds
@@ -620,7 +620,7 @@ public class TimeController : MonoBehaviour
                 accumulatedAge = IncrementWithWrap(accumulatedAge, MAX_DAY_COUNTER); // Increment accumulated age at the end of each night
                 FinishGerminationDay();
                 seedManager.SeedDecay();
-                grassManager.UpdateGenera();
+                grassManager.RecountGenera();
                 long completedDay = simDaysSinceStart > 0 ? simDaysSinceStart - 1 : MAX_DAY_COUNTER - 1;
                 if (researchLogger != null)
                 {

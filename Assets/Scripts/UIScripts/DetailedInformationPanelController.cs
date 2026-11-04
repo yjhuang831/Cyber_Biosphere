@@ -288,10 +288,30 @@ public class DetailedInformationPanelController : MonoBehaviour
                 " | Germ: " + seed.germinationEnergy.ToString("F2") +
                 " | Stage: " + seed.germinationStage + "/" + seed.sproutStage +
                 (seed.germinationCue > 0f ? " | Cue: " + seed.germinationCue.ToString("F2") : "") +
-                (seed.coldPreservation > 0f ? " | Cold: " + FormatPercent(seed.coldPreservation * 100f) : "");
+                (seed.coldPreservation > 0f ? " | Cold: " + FormatPercent(seed.coldPreservation * 100f) : "") +
+                " | " + DescribeSeedState(seed, currentData, seedManager);
         }
 
         seedInfoText.text = result;
+    }
+
+    private static string DescribeSeedState(Seed seed, EnvironmentData data, SeedManager seedManager)
+    {
+        if (data == null)
+            return "";
+        float fit = SeedManager.GerminationSuitability(seed.carriedGenome, data);
+        if (seed.germinationStage >= seed.sproutStage)
+        {
+            if (seed.storedEnergy < seedManager.minimumSproutEnergy)
+                return "germinated, too weak to sprout (dies at dawn)";
+            if (!SeedManager.CanTakeSeedling(data))
+                return "seedling bank: waiting for a gap";
+            return fit >= seedManager.minimumSproutFit ? "sprouting at the next step" : "waiting for conditions to sprout";
+        }
+        float threshold = seedManager.GerminationThreshold(seed);
+        return fit >= threshold
+            ? "germinating"
+            : "dormant: fit " + (fit * 100f).ToString("F0") + "% < " + (threshold * 100f).ToString("F0") + "%";
     }
 
     private void UpdateGrassInfo()
@@ -571,7 +591,8 @@ public class DetailedInformationPanelController : MonoBehaviour
         float baseGrowthCost = grassManager != null ? grassManager.baseGrowthCost : DEFAULT_BASE_GROWTH_COST;
         EnvironmentManager environmentManager = grassManager != null ? grassManager.environmentManager : null;
         float heightGrowthEnergy = grassManager != null ? grass.HeightGrowthEnergyMultiplier(grassManager.shortestGrowthEnergy, grassManager.tallestGrowthEnergy) : 1f;
-        GrassInstance.EnergyBudget budget = grass.EstimateEnergyBudget(envData, costPerGene, baseGrowthCost, heightGrowthEnergy);
+        float rootUpkeepPerTile = grassManager != null ? grassManager.rootUpkeepPerTile : 0f;
+        GrassInstance.EnergyBudget budget = grass.EstimateEnergyBudget(envData, costPerGene, baseGrowthCost, heightGrowthEnergy, rootUpkeepPerTile);
         GrassInstance.PhotosynthesisFactors factors = grass.CalculatePhotosynthesis(envData);
 
         StringBuilder text = new StringBuilder(2048);
@@ -650,7 +671,15 @@ public class DetailedInformationPanelController : MonoBehaviour
             text.Append("  Leaf nitrogen: ").Append(grass.leafNitrogen.ToString("F2"))
                 .Append(Colored(MUTED_COLOR, " (" + (grass.LeafNitrogenRatio(grassManager.leafNitrogenTarget) * 100f).ToString("F0") + "% of target; photosynthesis x" + grass.nitrogenFactor.ToString("F2") + ")")).Append('\n');
             text.Append("  Phosphorus: ").Append(grass.phosphorusReserve.ToString("F2"))
-                .Append(Colored(MUTED_COLOR, " (taken from its tile; pays for flowering)")).Append('\n');
+                .Append(Colored(MUTED_COLOR, " (taken through its roots; pays for flowering)")).Append('\n');
+            int rootLimit = grass.RootLimit;
+            text.Append("  Roots: ").Append(grass.rootCount).Append(grass.rootCount == 1 ? " tile" : " tiles")
+                .Append(Colored(MUTED_COLOR, " (reach " + rootLimit + ", room for " + (RootZone.CountBits(RootZone.WithinDistance[rootLimit]) - 1)
+                    + "; growing while hunger " + (grass.NutrientHunger * 100f).ToString("F0") + "% > " + (grassManager.rootHungerSetPoint * 100f).ToString("F0") + "%)")).Append('\n');
+            AppendRootMap(text, grass, envData);
+            float focus = grass.NutrientFocus;
+            string lean = focus < -0.05f ? "scavenges nitrogen better, phosphorus worse" : focus > 0.05f ? "scavenges phosphorus better, nitrogen worse" : "generalist";
+            text.Append("  Nutrient focus: ").Append(focus.ToString("+0.00;-0.00;0.00")).Append(Colored(MUTED_COLOR, " (" + lean + ")")).Append('\n');
         }
 
         List<string> warnings = CollectWarnings(grass, envData, budget, factors);
@@ -804,6 +833,38 @@ public class DetailedInformationPanelController : MonoBehaviour
         return "";
     }
 
+    /// <summary>
+    /// Map of the root zone, north up: @ the plant, # a root on its own terrain, ~ a root on the other terrain,
+    /// . a tile within reach, blank beyond reach or off the map.
+    /// </summary>
+    private static void AppendRootMap(StringBuilder text, GrassInstance grass, EnvironmentData envData)
+    {
+        int limit = grass.RootLimit;
+        if (limit <= 0 || envData.rootZone == null)
+            return;
+
+        text.Append("<mspace=0.6em>");
+        for (int dy = limit; dy >= -limit; dy--)
+        {
+            text.Append("    ");
+            for (int dx = -limit; dx <= limit; dx++)
+            {
+                int slot = RootZone.IndexOf(dx, dy);
+                char mark = ' ';
+                if (slot == 0)
+                    mark = '@';
+                else if (slot > 0 && RootZone.Distance[slot] <= limit && envData.rootZone[slot] != null)
+                {
+                    bool rooted = (grass.rootMask & (1u << slot)) != 0;
+                    mark = !rooted ? '.' : envData.rootZone[slot].isWater == envData.isWater ? '#' : '~';
+                }
+                text.Append(mark).Append(' ');
+            }
+            text.Append('\n');
+        }
+        text.Append("</mspace>");
+    }
+
     private static void AppendEnergyBudget(StringBuilder text, GrassInstance grass, EnvironmentData envData, GrassInstance.EnergyBudget budget)
     {
         int genes = grass.genome.expressedLocusCount;
@@ -819,6 +880,10 @@ public class DetailedInformationPanelController : MonoBehaviour
         if (budget.storageDevelopment > 0f)
         {
             AppendFlow(text, '-', "Storage development", budget.storageDevelopment, null, null);
+        }
+        if (budget.rootUpkeep > 0f)
+        {
+            AppendFlow(text, '-', "Root upkeep", budget.rootUpkeep, null, grass.rootCount + " root tiles");
         }
         text.Append("  = <b>Net ").Append(FormatSigned(budget.Net)).Append("/s</b>");
         if (grass.energyStored >= grass.EnergyCapacity && budget.Net > 0f)
@@ -878,6 +943,8 @@ public class DetailedInformationPanelController : MonoBehaviour
             cloneStatus = Colored(WARN_COLOR, "paused while dormant");
         else if (grass.grassDensity < 1f)
             cloneStatus = Colored(WARN_COLOR, "needs full size (now " + (grass.grassDensity * 100f).ToString("F0") + "%)");
+        else if (grass.rootCount == 0)
+            cloneStatus = Colored(WARN_COLOR, grass.RootLimit == 0 ? "roots can't leave its own tile (reach 0)" : "needs a root tile to send a clone to");
         else if (grass.energyStored < grass.ScaledEnergyThreshold(cloneEnergy))
             cloneStatus = Colored(WARN_COLOR, "needs " + grass.ScaledEnergyThreshold(cloneEnergy).ToString("F0") + " energy (has " + grass.energyStored.ToString("F0") + ")");
         else if (grassManager != null && grass.LeafNitrogenRatio(grassManager.leafNitrogenTarget) < grassManager.cloneMinNitrogenRatio)
@@ -889,7 +956,7 @@ public class DetailedInformationPanelController : MonoBehaviour
         text.Append("  Cloning: ").Append(cloneStatus).Append('\n');
         if (cloneEnergy >= 0.0001f)
         {
-            text.Append("    ").Append(Colored(MUTED_COLOR, "Copies itself to a random free neighbour, giving the clone "
+            text.Append("    ").Append(Colored(MUTED_COLOR, "Copies itself to a random root tile, if free, giving the clone "
                 + genome.GetTraitValue(TraitId.SpreadCost).ToString("F0") + " energy")).Append('\n');
         }
 

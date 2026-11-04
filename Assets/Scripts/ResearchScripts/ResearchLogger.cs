@@ -189,6 +189,10 @@ internal class ResearchLogger
     private void AddPlantStats(DailySummary summary)
     {
         double energy = 0, density = 0, age = 0, generation = 0, loci = 0, capacity = 0, starchCapacity = 0, starchStored = 0, shadeLight = 0, nitrogen = 0, nitrogenFactor = 0, phosphorus = 0;
+        double rootTiles = 0, rootTilesOtherTerrain = 0, focusSum = 0;
+        // Correlation of nutrient focus with the soil's N:P (ln) on the plant's own tile
+        double corrN = 0, corrX = 0, corrY = 0, corrXX = 0, corrYY = 0, corrXY = 0;
+        genusRootSums.Clear();
         Dictionary<string, LineageCount> lineages = new Dictionary<string, LineageCount>();
 
         foreach (GrassInstance grass in grassManager.activeGrassInstances.Values)
@@ -199,8 +203,36 @@ internal class ResearchLogger
             else if (grass.IsFlowering) summary.plantsFlowering++;
             else summary.plantsActive++;
 
-            if (mapManager != null && mapManager.GetTileEnvironmentData(grass.tilePosition).isWater)
+            EnvironmentData soil = mapManager != null ? mapManager.GetTileEnvironmentData(grass.tilePosition) : null;
+            if (soil != null && soil.isWater)
                 summary.plantsInWater++;
+
+            float focus = grass.NutrientFocus;
+            rootTiles += grass.rootCount;
+            focusSum += focus;
+            if (grass.rootCount > 0)
+                summary.plantsWithRoots++;
+            if (soil != null)
+            {
+                if (grass.rootCount > 0 && soil.rootZone != null)
+                {
+                    for (int slot = 1; slot < RootZone.SIZE; slot++)
+                    {
+                        if ((grass.rootMask & (1u << slot)) != 0 && soil.rootZone[slot] != null && soil.rootZone[slot].isWater != soil.isWater)
+                            rootTilesOtherTerrain++;
+                    }
+                }
+                double soilRatio = Math.Log((Math.Max(0.0, soil.availableNitrogen) + 0.01) / (Math.Max(0.0, soil.availablePhosphorus) + 0.01));
+                corrN++;
+                corrX += focus;
+                corrY += soilRatio;
+                corrXX += focus * focus;
+                corrYY += soilRatio * soilRatio;
+                corrXY += focus * soilRatio;
+            }
+            if (!genusRootSums.TryGetValue(grass.genome.genusId, out Vector3 sums))
+                sums = Vector3.zero;
+            genusRootSums[grass.genome.genusId] = sums + new Vector3(grass.rootCount, focus, 1f);
 
             energy += grass.energyStored;
             capacity += grass.EnergyCapacity;
@@ -250,6 +282,14 @@ internal class ResearchLogger
             summary.meanAgeDays = (float)(age / summary.plants);
             summary.meanGeneration = (float)(generation / summary.plants);
             summary.meanLoci = (float)(loci / summary.plants);
+            summary.meanRootTiles = (float)(rootTiles / summary.plants);
+            summary.shareRootTilesOtherTerrain = rootTiles > 0 ? (float)(rootTilesOtherTerrain / rootTiles) : 0f;
+            summary.meanNutrientFocus = (float)(focusSum / summary.plants);
+            double spreadX = corrN * corrXX - corrX * corrX;
+            double spreadY = corrN * corrYY - corrY * corrY;
+            summary.focusSoilCorrelation = spreadX > 1e-9 && spreadY > 1e-9
+                ? (float)((corrN * corrXY - corrX * corrY) / Math.Sqrt(spreadX * spreadY))
+                : 0f;
         }
 
         summary.lineages.AddRange(lineages.Values);
@@ -267,11 +307,15 @@ internal class ResearchLogger
         return null;
     }
 
+    // Per genus during AddPlantStats: (root tiles sum, nutrient focus sum, plants)
+    private readonly Dictionary<int, Vector3> genusRootSums = new Dictionary<int, Vector3>();
+
     private void AddGenusStats(DailySummary summary)
     {
         summary.genera = new List<GenusCount>(grassManager.genusTracker.Count);
         foreach (GenusRecord genus in grassManager.genusTracker.Genera)
         {
+            genusRootSums.TryGetValue(genus.id, out Vector3 sums);
             summary.genera.Add(new GenusCount
             {
                 id = genus.id,
@@ -281,7 +325,9 @@ internal class ResearchLogger
                 parentGenusId = genus.parentGenusId,
                 foundedDay = genus.foundedDay,
                 plants = genus.plants,
-                seeds = genus.seeds
+                seeds = genus.seeds,
+                meanRootTiles = sums.z > 0f ? sums.x / sums.z : 0f,
+                meanNutrientFocus = sums.z > 0f ? sums.y / sums.z : 0f
             });
         }
         summary.genera.Sort((a, b) => b.plants.CompareTo(a.plants));
@@ -546,6 +592,11 @@ internal class DailySummary
     public float meanPhosphorusReserve;
     public int plantsShaded;
     public float meanLightWhenShaded;   // Share of light reaching the plants that are shaded
+    public float meanRootTiles;         // Root tiles beyond the plant's own
+    public int plantsWithRoots;         // At least one root tile, so the plant may clone
+    public float shareRootTilesOtherTerrain; // Share of root tiles on the other terrain (land roots in water or the reverse)
+    public float meanNutrientFocus;     // -1 nitrogen .. +1 phosphorus
+    public float focusSoilCorrelation;  // Correlation of focus with ln(N/P) of the plant's tile; > 0 means plants lean toward the nutrient their soil lacks
 
     public DailyEventCounts events;
 }
@@ -561,6 +612,8 @@ internal class GenusCount
     public long foundedDay;
     public int plants;
     public int seeds;
+    public float meanRootTiles;
+    public float meanNutrientFocus;
 }
 
 [Serializable]

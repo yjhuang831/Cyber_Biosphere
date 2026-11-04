@@ -89,6 +89,7 @@ internal class DailyEventCounts
     public int seedsLost;          // Landed off-map or on a full tile
     public int seedsSprouted;
     public int seedsFailedToSprout; // Lost the germination roll
+    public int seedsDiedGerminated; // Germinated, but reserves fell below what sprouting needs before a gap opened
     public int seedsExhausted;     // Spent all energy while germinating
     public int seedsDecayed;       // Ran out of energy from daily decay
     public int seedsPruned;        // Could no longer afford the remaining germination stages
